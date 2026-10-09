@@ -1,0 +1,86 @@
+# ── Python ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# ── Virtual environments ───────────────────────────────
+.venv/
+.venv1/
+venv/
+env/
+.virtualenv/
+
+# ── PyInstaller / сборки ───────────────────────────────
+build/
+dist/
+*.spec.bak
+
+# ── NEXUS пользовательские данные ──────────────────────
+nexus_data/
+nexus_logs/
+nexus_backups/
+nexus_backup/
+nexus_exports/
+nexus_qr_exports/
+nexus_attachments/
+nexus_plugins/
+nexus_cache/
+_trash/
+.nexus_backup/
+_doctor_backup_*/
+*doctor_backup*/
+
+# ── .deb / .7z сборки ──────────────────────────────────
+*.deb
+*.7z
+*.tar.gz
+*.zip
+
+# ── Одноразовые скрипты (можно оставить в репо или нет) ─
+# Раскомментируй если НЕ хочешь их в git:
+# nexus_cleaner.py
+# nexus_doctor.py
+# nexus_doctor_v2.py
+# fix_duplicates.py
+# fix_stubs.py
+# icon_generator.py
+# make_installer.sh
+# recreate_icon.sh
+# cube.sh
+
+# ── IDE ────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Логи ───────────────────────────────────────────────
+*.log
+*.jsonl
+
+# ── Бэкапы ─────────────────────────────────────────────
+*.bak
+*.old
+*~
+
+# ── Кэши ───────────────────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ── NEXUS specific ─────────────────────────────────────
+.qr_presets.json
+code_draft.json
+session.token
+session.key
+.pepper
