@@ -12,6 +12,7 @@ import os
 import queue
 import re
 import threading
+import webbrowser
 import time
 import traceback
 from contextlib import suppress
@@ -624,6 +625,7 @@ class NexusApp(ctk.CTk):
                         add="+")
         self.bind_all("<ButtonPress>", self._mark_activity,
                         add="+")
+
 
         try:
             self.report_callback_exception = _tk_callback_excepthook
@@ -1522,6 +1524,18 @@ class NexusApp(ctk.CTk):
             context_tracker.record("page_view",
                                     {"page": name})
 
+        # Сбросить ссылки на виджеты Code Studio
+        # ДО уничтожения, чтобы не осталось
+        # висячих ссылок.
+        with suppress(Exception):
+            self._reset_code_refs()
+
+        # Сбросить ссылки на виджеты Code Studio
+        # ДО уничтожения — иначе останутся висячие
+        # ссылки на мёртвые виджеты.
+        with suppress(Exception):
+            self._reset_code_refs()
+
         # Уничтожить старые виджеты
         children = self.page_container.winfo_children()
         for w in children:
@@ -1531,6 +1545,20 @@ class NexusApp(ctk.CTk):
                 pass
         with suppress(Exception):
             self.page_container.update_idletasks()
+
+                # Сбросить ссылки на виджеты Code Studio —
+        # они уже уничтожены вместе со старыми
+        # виджетами в page_container.
+        # Иначе при возврате в Code получим
+        # 'invalid command name ...!label'.
+        with suppress(Exception):
+            self._code_out = None
+            self._code_widget = None
+            self._code_status_lbl = None
+            self._code_lang_var = None
+            self._code_template_var = None
+            self._code_tabs_container = None
+            self._code_tabs_bar = None
 
         # Подсветить кнопку
         for label, btn in self.sidebar_buttons.items():
@@ -1697,6 +1725,35 @@ class NexusApp(ctk.CTk):
                      duration: Optional[int] = None) -> None:
         if (not self.config_data.notifications
                 or self._is_closing):
+            return
+        # Защита от мёртвого toast_container
+        try:
+            if (not hasattr(self, "toast_container")
+                    or self.toast_container is None
+                    or not self.toast_container.winfo_exists()):
+                return
+        except Exception:
+            return
+        # Защита: toast_container может быть невалиден,
+        # если окно перерисовывается или toast_container
+        # уже уничтожен — иначе падает с
+        # 'invalid command name ...!label'
+        try:
+            if (not hasattr(self, "toast_container")
+                    or not self.toast_container
+                    or not self.toast_container.winfo_exists()):
+                return
+        except Exception:
+            return
+        # Фильтр пустых/мусорных ошибок
+        # Защита: toast_container может быть невалиден
+        # при запуске кода до полной инициализации UI
+        try:
+            if (not hasattr(self, "toast_container")
+                    or not self.toast_container
+                    or not self.toast_container.winfo_exists()):
+                return
+        except Exception:
             return
         # Фильтр пустых/мусорных ошибок
         if typ == "error":
@@ -1992,16 +2049,33 @@ class NexusApp(ctk.CTk):
                     tab.get("lang", "python"))
 
     def _on_code_lang_change(self, lang: str) -> None:
-        self.config_data.code_last_language = lang
-        self.config_data.save()
-        if (0 <= self._code_current_tab < len(self._code_tabs)):
-            self._code_tabs[self._code_current_tab]["lang"] = lang
-        if self._code_status_lbl is not None:
-            with suppress(Exception):
+        """Смена языка кода. Устойчиво к мёртвым ссылкам."""
+        try:
+            self.config_data.code_last_language = lang
+            self.config_data.save()
+        except Exception:
+            pass
+        try:
+            if (0 <= self._code_current_tab
+                    < len(self._code_tabs)):
+                self._code_tabs[
+                    self._code_current_tab]["lang"] = lang
+        except Exception:
+            pass
+        try:
+            if (self._code_status_lbl is not None
+                    and self._code_status_lbl.winfo_exists()):
                 self._code_status_lbl.configure(
                     text=f"🗣️ {lang}")
-        if self._code_widget is not None:
-            self._schedule_highlight(self._code_widget, lang)
+        except Exception:
+            pass
+        try:
+            if (self._code_widget is not None
+                    and self._code_widget.winfo_exists()):
+                self._schedule_highlight(
+                    self._code_widget, lang)
+        except Exception:
+            pass
 
     def _on_font_size(self, value: str,
                        var: StringVar) -> None:
@@ -2483,56 +2557,197 @@ class NexusApp(ctk.CTk):
         self._show_toast("📋 Загружено в редактор",
                           "success", 1500)
 
-    def _run_code_current(self) -> None:
-        # FIX: проверяем язык — только Python запускаем
+
         lang = (self._code_lang_var.get()
                  if self._code_lang_var else "python")
-        if lang != "python":
-            self._show_toast(
-                f"⚠️ Запуск поддерживается только для Python. "
-                f"«{lang}» — только редактирование и сохранение.",
-                "warning", 4000)
-            # Не падаем, просто не запускаем
+
+        # Preview-языки — открываем окно предпросмотра
+        if lang in ("html", "css", "markdown"):
+            self._open_preview(src, lang)
             return
 
-        w = self._code_widget
-        if w is None:
+        # Проверяем доступность интерпретатора
+        try:
+            from nexus.sandbox import lang_available
+            ok, hint = lang_available(lang)
+            if not ok:
+                self._show_toast(
+                    f"❌ {hint}", "error", 6000)
+                return
+        except Exception:
+            pass
+
+        out.delete("1.0", "end")
+        out.insert("1.0",
+                    f"⏳ Выполняется ({lang}) в песочнице...")
+
+        def work() -> None:
+            import time as _time
+            from nexus.sandbox import MultiLangRunner
+            start = _time.time()
+            try:
+                stdout, stderr, success = MultiLangRunner.run(
+                    src, lang=lang, timeout=10)
+            except Exception as e:
+                stdout, stderr, success = "", f"❌ {e}", False
+            elapsed = _time.time() - start
+            with suppress(Exception):
+                CodeHistory.add(
+                    self.current_user, src,
+                    stdout or "", success, elapsed,
+                    stderr or "")
+            self._safe_after(
+                0, self._apply_code_result, out,
+                stdout or "", stderr or "",
+                elapsed, success)
+        executor.submit_safe(work)
+
+        lang = (self._code_lang_var.get()
+                 if self._code_lang_var else "python")
+
+        # Preview-языки — открываем окно предпросмотра
+        if lang in ("html", "css", "markdown"):
+            self._open_preview(src, lang)
             return
+
+        # Проверяем доступность интерпретатора
+        try:
+            from nexus.sandbox import lang_available
+            ok, hint = lang_available(lang)
+            if not ok:
+                self._show_toast(
+                    f"❌ {hint}", "error", 6000)
+                return
+        except Exception:
+            pass
+
+        out.delete("1.0", "end")
+        out.insert("1.0",
+                    f"⏳ Выполняется ({lang}) в песочнице...")
+
+        def work() -> None:
+            import time as _time
+            from nexus.sandbox import MultiLangRunner
+            start = _time.time()
+            try:
+                stdout, stderr, success = MultiLangRunner.run(
+                    src, lang=lang, timeout=10)
+            except Exception as e:
+                stdout, stderr, success = "", f"❌ {e}", False
+            elapsed = _time.time() - start
+            with suppress(Exception):
+                CodeHistory.add(
+                    self.current_user, src,
+                    stdout or "", success, elapsed,
+                    stderr or "")
+            self._safe_after(
+                0, self._apply_code_result, out,
+                stdout or "", stderr or "",
+                elapsed, success)
+        executor.submit_safe(work)
 
     def _run_all_tabs(self) -> None:
+        """Запустить код всех вкладок по очереди (мультиязычно)."""
         if not self._code_tabs:
             self._show_toast("Нет вкладок", "warning")
             return
-
-        # FIX: запускаем только Python-вкладки
-        lang = (self._code_lang_var.get()
-                 if self._code_lang_var else "python")
-        if lang != "python":
-            self._show_toast(
-                f"⚠️ Batch-запуск только для Python",
-                "warning", 3000)
+        out = self._code_out
+        if out is None:
             return
+
+        # Синхронизировать текущую вкладку
+        if (self._code_widget is not None
+                and 0 <= self._code_current_tab < len(
+                    self._code_tabs)):
+            with suppress(Exception):
+                self._code_tabs[
+                    self._code_current_tab]["code"] = \
+                    self._code_widget.get("1.0", "end-1c")
+
+        # Собираем непустые вкладки (с языком каждой)
+        tabs_to_run: List[Tuple[str, str, str]] = []
+        for i, tab in enumerate(self._code_tabs):
+            code = (tab.get("code") or "").strip()
+            if code:
+                name = tab.get("name", f"tab{i+1}")
+                tab_lang = tab.get("lang", "python")
+                tabs_to_run.append((name, code, tab_lang))
+
+        if not tabs_to_run:
+            self._show_toast("Все вкладки пусты", "warning")
+            return
+
+        out.delete("1.0", "end")
+        out.insert("1.0",
+                    f"▶▶ Запуск {len(tabs_to_run)} вкладок...\n\n")
+        if self._code_status_lbl is not None:
+            with suppress(Exception):
+                self._code_status_lbl.configure(
+                    text=f"▶▶ 0/{len(tabs_to_run)}")
+
+        def work() -> None:
+            from nexus.sandbox import MultiLangRunner
+            total = len(tabs_to_run)
+            for idx, (name, code, tab_lang) in enumerate(
+                    tabs_to_run, 1):
+                self._safe_after(
+                    0, self._update_batch_progress,
+                    idx, total, name)
+                try:
+                    stdout, stderr, ok = MultiLangRunner.run(
+                        code, lang=tab_lang, timeout=10)
+                except Exception as e:
+                    stdout, stderr, ok = "", str(e), False
+                self._safe_after(
+                    0, self._append_tab_result,
+                    name, stdout, stderr, ok)
+            self._safe_after(
+                0, self._finish_batch_run, total)
+
+        executor.submit_safe(work)
         
 
     def _run_code_current(self) -> None:
-        """Запуск кода в sandbox."""
+        """Запуск кода в песочнице (мультиязычный)."""
         w = self._code_widget
         if w is None:
             return
         src = w.get("1.0", "end-1c").strip()
         out = self._code_out
         if not src or out is None:
+            self._show_toast("Пустой код", "warning")
             return
+
+        lang = (self._code_lang_var.get()
+                 if self._code_lang_var else "python")
+
+        # Preview-языки — открываем окно предпросмотра
+        if lang in ("html", "css", "markdown"):
+            self._open_preview(src, lang)
+            return
+
+        # Проверяем доступность интерпретатора
+        try:
+            from nexus.sandbox import lang_available
+            ok, hint = lang_available(lang)
+            if not ok:
+                self._show_toast(
+                    f"❌ {hint}", "error", 6000)
+                return
+        except Exception:
+            pass
+
         out.delete("1.0", "end")
-        out.insert("1.0", "⏳ Выполняется в песочнице...")
+        out.insert("1.0",
+                    f"⏳ Выполняется ({lang}) в песочнице...")
 
         def work() -> None:
             import time as _time
-            from nexus.sandbox import SandboxRunner
+            from nexus.sandbox import MultiLangRunner
             start = _time.time()
             try:
-                stdout, stderr, success = SandboxRunner.run(
-                    src, timeout=10)
+                stdout, stderr, success = MultiLangRunner.run(
+                    src, lang=lang, timeout=10)
             except Exception as e:
                 stdout, stderr, success = "", f"❌ {e}", False
             elapsed = _time.time() - start
@@ -2553,7 +2768,26 @@ class NexusApp(ctk.CTk):
         try:
             if not out.winfo_exists():
                 return
+    
             out.delete("1.0", "end")
+            with suppress(Exception):
+                    self._show_toast(
+                        f"✅ Выполнено за {elapsed:.2f}с",
+                        "success", 2500)
+            # Preview-маркер (HTML/CSS/MD)
+            if stdout.startswith("__HTML__"):
+                html_len = len(stdout) - len("__HTML__")
+                out.insert(
+                    "1.0",
+                    f"🌐 HTML готов ({html_len} символов)\n\n"
+                    f"Окно preview открыто отдельно.\n"
+                    f"Кнопки: 🌐 браузер · 📋 копия · 💾 файл")
+                # Тост может упасть, если UI не инициализирован
+                with suppress(Exception):
+                    self._show_toast(
+                        "🌐 HTML preview", "success", 2000)
+                return
+
             parts: List[str] = []
             if stdout.strip():
                 parts.append(stdout)
@@ -2592,6 +2826,361 @@ class NexusApp(ctk.CTk):
                     "error", 4000)
         except Exception:
             pass
+
+    def _open_preview(self, src: str, lang: str) -> None:
+        """Открыть окно предпросмотра HTML/CSS/Markdown."""
+        t = theme_manager.get_all()
+        win = CTkToplevel(self)
+        win.title(f"🖼️ Предпросмотр · {lang}")
+        win.geometry("900x700")
+        win.configure(fg_color=t.get("bg"))
+        win.transient(self)
+        win.bind("<Escape>", lambda e: win.destroy())
+        self.update_idletasks()
+        x = self.winfo_x() + max(
+            0, (self.winfo_width() - 900) // 2)
+        y = self.winfo_y() + max(
+            0, (self.winfo_height() - 700) // 2)
+        win.geometry(f"+{x}+{y}")
+
+        head = CTkFrame(win, fg_color="transparent")
+        head.pack(fill="x", padx=15, pady=(15, 8))
+        CTkLabel(head,
+                 text=f"🖼️ ПРЕДПРОСМОТР · {lang.upper()}",
+                 font=CTkFont(size=17, weight="bold"),
+                 text_color=t.get("primary"),
+                 anchor="w").pack(side="left")
+        CTkLabel(head, text=f"{len(src)} символов",
+                 font=CTkFont(size=11),
+                 text_color=t.get("text_dim")).pack(side="right")
+
+        btns = CTkFrame(win, fg_color="transparent")
+        btns.pack(fill="x", padx=15, pady=(0, 8))
+
+        CTkButton(btns, text="🌐 Открыть в браузере",
+                  height=34, width=200,
+                  font=CTkFont(size=11, weight="bold"),
+                  fg_color=t.get("success"),
+                  text_color=t.get("bg"),
+                  command=lambda:
+                      self._preview_in_browser(src, lang)
+                  ).pack(side="left", padx=2)
+        CTkButton(btns, text="📋 Копировать HTML",
+                  height=34, width=180,
+                  font=CTkFont(size=11, weight="bold"),
+                  fg_color=t.get("accent"),
+                  text_color=t.get("bg"),
+                  command=lambda:
+                      self._copy_preview_html(src, lang)
+                  ).pack(side="left", padx=2)
+        CTkButton(btns, text="💾 Сохранить HTML",
+                  height=34, width=180,
+                  font=CTkFont(size=11, weight="bold"),
+                  fg_color=t.get("primary"),
+                  text_color=t.get("bg"),
+                  command=lambda:
+                      self._save_preview_html(src, lang)
+                  ).pack(side="left", padx=2)
+
+        tabs = ctk.CTkTabview(
+            win, fg_color=t.get("bg2"),
+            segmented_button_fg_color=t.get("bg3"),
+            segmented_button_selected_color=t.get("primary"),
+            segmented_button_selected_hover_color=t.get(
+                "primary"),
+            text_color=t.get("text"))
+        tabs.pack(fill="both", expand=True, padx=15,
+                   pady=(0, 15))
+
+        tab_html = tabs.add("📄 HTML")
+        tab_src = tabs.add("📝 Исходник")
+
+        html_code = self._prepare_html(src, lang)
+        html_box = CTkTextbox(
+            tab_html,
+            font=CTkFont(family="Courier", size=11),
+            fg_color=t.get("code_bg"),
+            text_color=t.get("code_text"),
+            wrap="word")
+        html_box.pack(fill="both", expand=True, padx=5,
+                       pady=5)
+        html_box.insert("1.0", html_code)
+        html_box.configure(state="disabled")
+
+        src_box = CTkTextbox(
+            tab_src,
+            font=CTkFont(family="Courier", size=11),
+            fg_color=t.get("code_bg"),
+            text_color=t.get("code_text"),
+            wrap="word")
+        src_box.pack(fill="both", expand=True, padx=5,
+                      pady=5)
+        src_box.insert("1.0", src)
+        src_box.configure(state="disabled")
+
+        self._safe_after(
+            400, lambda:
+            self._preview_in_browser(src, lang))
+
+    def _prepare_html(self, src: str, lang: str) -> str:
+        if lang == "html":
+            return src
+        if lang == "css":
+            return (f"<!DOCTYPE html><html><head>"
+                    f"<meta charset='utf-8'>"
+                    f"<style>{src}</style></head>"
+                    f"<body><h1>CSS Preview</h1>"
+                    f"<p>Пример текста.</p>"
+                    f"<button>Кнопка</button></body></html>")
+        if lang == "markdown":
+            try:
+                from nexus.sandbox import MultiLangRunner
+                body = MultiLangRunner._markdown_to_html(src)
+            except Exception:
+                body = f"<pre>{src}</pre>"
+            return (
+                "<!DOCTYPE html><html><head>"
+                "<meta charset='utf-8'>"
+                "<style>body{font-family:system-ui;"
+                "max-width:800px;margin:40px auto;"
+                "padding:20px;line-height:1.6;color:#333}"
+                "code{background:#f4f4f4;padding:2px 6px;"
+                "border-radius:3px}"
+                "pre{background:#f4f4f4;padding:12px;"
+                "border-radius:6px;overflow:auto}"
+                "</style></head><body>" + body +
+                "</body></html>")
+        return src
+
+    def _preview_in_browser(self, src: str,
+                             lang: str) -> None:
+        try:
+            import tempfile
+            html = self._prepare_html(src, lang)
+            with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".html",
+                    delete=False, encoding="utf-8") as f:
+                f.write(html)
+                path = f.name
+            webbrowser.open(f"file://{path}")
+            with suppress(Exception):
+                self._show_toast("🌐 Открыто в браузере",
+                                  "success", 2000)
+        except Exception as e:
+            with suppress(Exception):
+                self._show_toast(f"❌ {e}", "error")
+
+    def _copy_preview_html(self, src: str,
+                            lang: str) -> None:
+        html = self._prepare_html(src, lang)
+        if copy_to_clipboard(html):
+            with suppress(Exception):
+                self._show_toast("📋 HTML скопирован",
+                                  "success", 2000)
+
+    def _save_preview_html(self, src: str,
+                            lang: str) -> None:
+        from tkinter import filedialog as _fd
+        from datetime import datetime as _dt
+        html = self._prepare_html(src, lang)
+        ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+        fp = _fd.asksaveasfilename(
+            parent=self,
+            defaultextension=".html",
+            initialfile=f"preview_{ts}.html",
+            filetypes=[("HTML", "*.html")])
+        if not fp:
+            return
+        try:
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(html)
+            with suppress(Exception):
+                self._show_toast(
+                    f"💾 {os.path.basename(fp)}",
+                    "success", 3000)
+            self._open_file(Path(fp))
+        except Exception as e:
+            with suppress(Exception):
+                self._show_toast(f"❌ {e}", "error")
+
+        # ────────────────────────────────────────────────
+    # PREVIEW для HTML / CSS / Markdown
+    # ────────────────────────────────────────────────
+    def _open_preview(self, src: str, lang: str) -> None:
+        """Открыть окно предпросмотра."""
+        t = theme_manager.get_all()
+
+        win = CTkToplevel(self)
+        win.title(f"🖼️ Предпросмотр · {lang}")
+        win.geometry("900x700")
+        win.configure(fg_color=t.get("bg"))
+        win.transient(self)
+        win.bind("<Escape>", lambda e: win.destroy())
+        self.update_idletasks()
+        x = self.winfo_x() + max(
+            0, (self.winfo_width() - 900) // 2)
+        y = self.winfo_y() + max(
+            0, (self.winfo_height() - 700) // 2)
+        win.geometry(f"+{x}+{y}")
+
+        head = CTkFrame(win, fg_color="transparent")
+        head.pack(fill="x", padx=15, pady=(15, 8))
+        CTkLabel(head,
+                 text=f"🖼️ ПРЕДПРОСМОТР · {lang.upper()}",
+                 font=CTkFont(size=17, weight="bold"),
+                 text_color=t.get("primary"),
+                 anchor="w").pack(side="left")
+        CTkLabel(head, text=f"{len(src)} символов",
+                 font=CTkFont(size=11),
+                 text_color=t.get("text_dim")).pack(side="right")
+
+        btns = CTkFrame(win, fg_color="transparent")
+        btns.pack(fill="x", padx=15, pady=(0, 8))
+
+        CTkButton(btns, text="🌐 Открыть в браузере",
+                  height=34, width=200,
+                  font=CTkFont(size=11, weight="bold"),
+                  fg_color=t.get("success"),
+                  text_color=t.get("bg"),
+                  command=lambda:
+                      self._preview_in_browser(src, lang)
+                  ).pack(side="left", padx=2)
+        CTkButton(btns, text="📋 Копировать HTML",
+                  height=34, width=180,
+                  font=CTkFont(size=11, weight="bold"),
+                  fg_color=t.get("accent"),
+                  text_color=t.get("bg"),
+                  command=lambda:
+                      self._copy_preview_html(src, lang)
+                  ).pack(side="left", padx=2)
+        CTkButton(btns, text="💾 Сохранить HTML",
+                  height=34, width=180,
+                  font=CTkFont(size=11, weight="bold"),
+                  fg_color=t.get("primary"),
+                  text_color=t.get("bg"),
+                  command=lambda:
+                      self._save_preview_html(src, lang)
+                  ).pack(side="left", padx=2)
+
+        tabs = ctk.CTkTabview(
+            win, fg_color=t.get("bg2"),
+            segmented_button_fg_color=t.get("bg3"),
+            segmented_button_selected_color=t.get("primary"),
+            segmented_button_selected_hover_color=t.get(
+                "primary"),
+            text_color=t.get("text"))
+        tabs.pack(fill="both", expand=True, padx=15,
+                   pady=(0, 15))
+
+        tab_html = tabs.add("📄 HTML")
+        tab_src = tabs.add("📝 Исходник")
+
+        html_code = self._prepare_html(src, lang)
+        html_box = CTkTextbox(
+            tab_html,
+            font=CTkFont(family="Courier", size=11),
+            fg_color=t.get("code_bg"),
+            text_color=t.get("code_text"),
+            wrap="word")
+        html_box.pack(fill="both", expand=True, padx=5,
+                       pady=5)
+        html_box.insert("1.0", html_code)
+        html_box.configure(state="disabled")
+
+        src_box = CTkTextbox(
+            tab_src,
+            font=CTkFont(family="Courier", size=11),
+            fg_color=t.get("code_bg"),
+            text_color=t.get("code_text"),
+            wrap="word")
+        src_box.pack(fill="both", expand=True, padx=5,
+                      pady=5)
+        src_box.insert("1.0", src)
+        src_box.configure(state="disabled")
+
+        # Авто-открытие в браузере через 400мс
+        self._safe_after(
+            400, lambda:
+            self._preview_in_browser(src, lang))
+
+    def _prepare_html(self, src: str, lang: str) -> str:
+        """Обернуть исходник в полноценный HTML."""
+        if lang == "html":
+            return src
+        if lang == "css":
+            return (f"<!DOCTYPE html><html><head>"
+                    f"<meta charset='utf-8'>"
+                    f"<style>{src}</style></head>"
+                    f"<body><h1>CSS Preview</h1>"
+                    f"<p>Пример текста для просмотра "
+                    f"стилей.</p>"
+                    f"<button>Кнопка</button></body></html>")
+        if lang == "markdown":
+            try:
+                from nexus.sandbox import MultiLangRunner
+                body = MultiLangRunner._markdown_to_html(src)
+            except Exception:
+                body = f"<pre>{src}</pre>"
+            return (
+                "<!DOCTYPE html><html><head>"
+                "<meta charset='utf-8'>"
+                "<style>body{font-family:system-ui;"
+                "max-width:800px;margin:40px auto;"
+                "padding:20px;line-height:1.6;color:#333}"
+                "code{background:#f4f4f4;padding:2px 6px;"
+                "border-radius:3px}"
+                "pre{background:#f4f4f4;padding:12px;"
+                "border-radius:6px;overflow:auto}"
+                "</style></head><body>" + body +
+                "</body></html>")
+        return src
+
+    def _preview_in_browser(self, src: str,
+                             lang: str) -> None:
+        """Открыть HTML в системном браузере."""
+        try:
+            import tempfile
+            html = self._prepare_html(src, lang)
+            with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".html",
+                    delete=False, encoding="utf-8") as f:
+                f.write(html)
+                path = f.name
+            webbrowser.open(f"file://{path}")
+            self._show_toast("🌐 Открыто в браузере",
+                              "success", 2000)
+        except Exception as e:
+            self._show_toast(f"❌ {e}", "error")
+
+    def _copy_preview_html(self, src: str,
+                            lang: str) -> None:
+        html = self._prepare_html(src, lang)
+        if copy_to_clipboard(html):
+            self._show_toast("📋 HTML скопирован",
+                              "success", 2000)
+
+    def _save_preview_html(self, src: str,
+                            lang: str) -> None:
+        from tkinter import filedialog as _fd
+        from datetime import datetime as _dt
+        html = self._prepare_html(src, lang)
+        ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+        fp = _fd.asksaveasfilename(
+            parent=self,
+            defaultextension=".html",
+            initialfile=f"preview_{ts}.html",
+            filetypes=[("HTML", "*.html")])
+        if not fp:
+            return
+        try:
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(html)
+            self._show_toast(
+                f"💾 {os.path.basename(fp)}",
+                "success", 3000)
+            self._open_file(Path(fp))
+        except Exception as e:
+            self._show_toast(f"❌ {e}", "error")
 
     # ────────────────────────────────────────────────
     # CODE: сохранение в файл
@@ -4135,6 +4724,17 @@ class NexusApp(ctk.CTk):
         db.backup()
         self._save_code_draft()
         self._show_toast("💾 Сохранено", "success")
+
+    def _reset_code_refs(self) -> None:
+        """Сбросить ссылки на виджеты Code Studio.
+        Вызывается перед уничтожением страницы."""
+        self._code_out = None
+        self._code_widget = None
+        self._code_status_lbl = None
+        self._code_lang_var = None
+        self._code_template_var = None
+        self._code_tabs_container = None
+        self._code_tabs_bar = None
 
     # ────────────────────────────────────────────────
     # DIALOG: POMODORO

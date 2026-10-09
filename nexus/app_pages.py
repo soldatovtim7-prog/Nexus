@@ -26,6 +26,7 @@ from customtkinter import (
     CTk, CTkFrame, CTkLabel, CTkButton, CTkEntry, CTkTextbox,
     CTkScrollableFrame, CTkOptionMenu, CTkProgressBar,
     CTkCheckBox, CTkRadioButton, CTkSegmentedButton,
+    CTkSwitch,
     CTkImage, CTkToplevel, CTkFont,
 )
 from tkinter import (
@@ -417,6 +418,11 @@ def _home_stat_card(parent: Any, col: int, title: str,
 # PAGE: CODE STUDIO
 # ═══════════════════════════════════════════════════════════
 def _page_code(app: Any, parent: CTkFrame) -> None:
+    # Сброс старых ссылок (если страница
+    # открывается повторно после переключения)
+    with suppress(Exception):
+        app._reset_code_refs()
+
     t = _t()
     cont = CTkFrame(parent, fg_color=t.get("bg"))
     cont.pack(fill="both", expand=True)
@@ -491,7 +497,11 @@ def _page_code(app: Any, parent: CTkFrame) -> None:
              font=CTkFont(size=11, weight="bold"),
              text_color=t.get("text_dim")
              ).pack(side="left", padx=(0, 4))
+    # Всегда создаём НОВУЮ StringVar, привязанную
+    # к главному окну — иначе после перерисовки
+    # получим мёртвую ссылку.
     app._code_lang_var = StringVar(
+        master=app,
         value=app.config_data.code_last_language or "python")
     CTkOptionMenu(
         inner,
@@ -509,7 +519,40 @@ def _page_code(app: Any, parent: CTkFrame) -> None:
         button_color=t.get("primary"),
         text_color=t.get("text"),
         command=app._on_code_lang_change
-    ).pack(side="left", padx=(0, 10))
+    ).pack(side="left", padx=(0, 6))
+
+    # ── Индикатор статуса языка ──────────────────────
+    lang_status_lbl = CTkLabel(
+        inner, text="",
+        font=CTkFont(size=9, slant="italic"),
+        text_color=t.get("text_dim"))
+    lang_status_lbl.pack(side="left", padx=(0, 10))
+
+    def _update_lang_status(lang: str) -> None:
+        try:
+            from nexus.sandbox import lang_available
+            ok, hint = lang_available(lang)
+            if ok:
+                lang_status_lbl.configure(
+                    text="✅ готов",
+                    text_color=t.get("success"))
+            else:
+                lang_status_lbl.configure(
+                    text=f"⚠️ {hint[:40]}",
+                    text_color=t.get("warning"))
+        except Exception:
+            lang_status_lbl.configure(text="")
+
+    # Патчим on_code_lang_change, чтобы обновлять статус
+    _orig_lang_change = app._on_code_lang_change
+    def _patched_lang_change(lang: str) -> None:
+        _update_lang_status(lang)
+        _orig_lang_change(lang)
+    app._on_code_lang_change = _patched_lang_change
+
+    # Первичная проверка
+    _update_lang_status(
+        app.config_data.code_last_language or "python")
 
     CTkLabel(inner, text="📚",
              font=CTkFont(size=11, weight="bold"),
@@ -517,7 +560,14 @@ def _page_code(app: Any, parent: CTkFrame) -> None:
              ).pack(side="left", padx=(0, 4))
     tpl_names = ["— не выбран —"] + CodeTemplates.get_names()
     app._code_template_var = StringVar(
-        value="— не выбран —")
+        master=app, value="— не выбран —")
+        # Сбросить старые ссылки (если страница
+    # открывается повторно после переключения)
+    app._code_out = None
+    app._code_widget = None
+    app._code_status_lbl = None
+    app._code_tabs_container = None
+    app._code_tabs_bar = None
     CTkOptionMenu(inner, values=tpl_names,
                    variable=app._code_template_var,
                    width=220, height=30,
@@ -3600,76 +3650,194 @@ def _page_settings(app: Any, parent: CTkFrame) -> None:
     t = _t()
     scroll = CTkScrollableFrame(parent, fg_color=t.get("bg"))
     scroll.pack(fill="both", expand=True)
-    app._page_header(
-        scroll, "НАСТРОЙКИ", "⚙️", "",
-        buttons=[("💾 Сохранить", t.get("primary"),
-                  lambda: app.config_data.save()
-                  and app._show_toast("💾 Сохранено",
-                                        "success"))])
 
-    # ── ВИД ──────────────────────────────────────────
-    card = app._section_card(
-        scroll, "🎨 ВИД", t.get("primary"))
-    tf = CTkFrame(card, fg_color="transparent")
-    tf.pack(fill="x", padx=UI_PAD_CARD, pady=6)
-    CTkLabel(tf, text="Тема:",
-             font=CTkFont(size=12, weight="bold"),
-             text_color=t.get("text_dim"),
-             anchor="w").pack(side="left", padx=(0, 8))
-    from nexus.app import theme_manager
-    theme_var = StringVar(value=theme_manager.current())
-    CTkOptionMenu(tf, values=theme_manager.list(),
-                   variable=theme_var, width=180,
-                   height=32,
-                   fg_color=t.get("bg3"),
-                   button_color=t.get("primary"),
-                   text_color=t.get("text"),
-                   command=lambda v:
-                       _change_theme(app, v)
-                   ).pack(side="left")
-    CTkLabel(tf, text="Язык:",
-             font=CTkFont(size=12, weight="bold"),
-             text_color=t.get("text_dim"),
-             anchor="w").pack(side="left", padx=(20, 8))
-    from nexus.app import I18n
-    lang_var = StringVar(value=I18n._current)
-    CTkOptionMenu(tf, values=I18n.available(),
-                   variable=lang_var, width=100,
-                   height=32,
-                   fg_color=t.get("bg3"),
-                   button_color=t.get("accent"),
-                   text_color=t.get("text"),
-                   command=lambda v: _change_language(app, v)
-                   ).pack(side="left")
+    # ── Заголовок страницы ────────────────────────────
+    app._page_header(scroll, "НАСТРОЙКИ", "⚙️",
+                      "конфигурация NEXUS")
 
-    # ── Toggles ──────────────────────────────────────
-    toggles = [
-        ("🔔 Уведомления", "notifications"),
-        ("🔊 Звуковые эффекты", "sound_effects"),
-        ("💾 Автобэкап", "auto_backup"),
-        ("📝 Автосохранение черновиков", "autosave_drafts"),
-        ("💻 Автосохранение кода", "code_auto_save"),
-        ("🎨 Подсветка синтаксиса",
-         "code_syntax_highlight"),
-        ("📱 Live-preview QR", "qr_live_preview"),
-        ("🛡️ HIBP-проверка паролей", "hibp_check_enabled"),
-        ("🌐 Авто-определение языка",
-         "auto_detect_language"),
-        ("🌗 Авто-тема (система)", "auto_theme"),
-        ("🌅 Авто-тема по времени", "auto_theme_time"),
-        ("🎯 Ежедневные квесты", "quests_enabled"),
-        ("📡 HTTP API", "api_enabled"),
-    ]
-    for label, attr in toggles:
-        var = BooleanVar(
-            value=getattr(app.config_data, attr, False))
+    # ── Панель инструментов: поиск + действия ────────
+    toolbar = CTkFrame(scroll, fg_color=t.get("bg2"),
+                        corner_radius=8, border_width=1,
+                        border_color=t.get("card_border"))
+    toolbar.pack(fill="x", pady=(0, UI_PAD_INNER))
+    tb_inner = CTkFrame(toolbar, fg_color="transparent")
+    tb_inner.pack(fill="x", padx=UI_PAD_CARD, pady=8)
 
-        def toggle(a: str = attr, v: Any = var) -> None:
-            setattr(app.config_data, a, v.get())
+    # Поиск
+    CTkLabel(tb_inner, text="🔍",
+             font=CTkFont(size=13),
+             text_color=t.get("text_dim")
+             ).pack(side="left", padx=(0, 4))
+    search_e = CTkEntry(
+        tb_inner,
+        placeholder_text="Поиск по настройкам...",
+        height=34, font=CTkFont(size=12),
+        fg_color=t.get("bg3"),
+        border_color=t.get("card_border"),
+        text_color=t.get("text"))
+    search_e.pack(side="left", fill="x", expand=True,
+                  padx=(0, 8))
+
+    # Кнопки
+    CTkButton(
+        tb_inner, text="💾 Сохранить",
+        width=130, height=34,
+        font=CTkFont(size=11, weight="bold"),
+        fg_color=t.get("success"),
+        text_color=t.get("bg"),
+        command=lambda: (
+            app.config_data.save(),
+            app._show_toast("💾 Сохранено", "success"))
+    ).pack(side="right", padx=2)
+
+    CTkButton(
+        tb_inner, text="↺ Сброс",
+        width=110, height=34,
+        font=CTkFont(size=11, weight="bold"),
+        fg_color=t.get("warning"),
+        text_color=t.get("bg"),
+        command=lambda: _settings_reset(app)
+    ).pack(side="right", padx=2)
+
+    CTkButton(
+        tb_inner, text="📤 Экспорт",
+        width=120, height=34,
+        font=CTkFont(size=11, weight="bold"),
+        fg_color=t.get("accent"),
+        text_color=t.get("bg"),
+        command=lambda: _settings_export(app)
+    ).pack(side="right", padx=2)
+
+    CTkButton(
+        tb_inner, text="📥 Импорт",
+        width=120, height=34,
+        font=CTkFont(size=11, weight="bold"),
+        fg_color=t.get("primary"),
+        text_color=t.get("bg"),
+        command=lambda: _settings_import(app)
+    ).pack(side="right", padx=2)
+
+    # ── Контейнер для секций ──────────────────────────
+    sections_container = CTkFrame(scroll,
+                                    fg_color="transparent")
+    sections_container.pack(fill="both", expand=True)
+
+    # Рендерим все секции
+    for section_title, items in SETTINGS_SECTIONS:
+        _render_settings_section(
+            app, sections_container, section_title, items)
+
+    # ── Фильтрация по поиску ──────────────────────────
+    def _filter_sections(*_a: Any) -> None:
+        q = search_e.get().strip().lower()
+        for section_card in sections_container.winfo_children():
+            # section_card = CTkFrame секции
+            # внутри — title + строки
+            matched = False
+            for sub in section_card.winfo_children():
+                # sub может быть CTkLabel (title) или CTkFrame (row)
+                if isinstance(sub, CTkFrame):
+                    # Проверяем текст лейблов внутри строки
+                    for lbl in sub.winfo_children():
+                        try:
+                            txt = str(lbl.cget("text")).lower()
+                            if q in txt:
+                                matched = True
+                                break
+                        except Exception:
+                            pass
+                else:
+                    # Это заголовок секции — тоже проверяем
+                    try:
+                        if q in str(sub.cget("text")).lower():
+                            matched = True
+                    except Exception:
+                        pass
+                if matched:
+                    break
+
+            if not q or matched:
+                section_card.pack(fill="x", pady=UI_PAD_INNER)
+            else:
+                section_card.pack_forget()
+
+    search_e.bind("<KeyRelease>", _filter_sections)
+
+    # ── Danger-зона внизу ─────────────────────────────
+    _render_danger_zone(app, scroll)
+
+def _render_settings_section(app: Any, parent: Any,
+                              title: str,
+                              items: List[Tuple]) -> None:
+    """Одна секция настроек (карточка с заголовком)."""
+    t = _t()
+
+    # Карточка секции
+    card = CTkFrame(parent, corner_radius=10,
+                    border_width=2,
+                    border_color=t.get("primary"),
+                    fg_color=t.get("bg2"))
+    card.pack(fill="x", pady=UI_PAD_INNER)
+
+    # Заголовок
+    head = CTkFrame(card, fg_color="transparent")
+    head.pack(fill="x", padx=UI_PAD_CARD, pady=(12, 6))
+
+    icon, _, text = title.partition(" ")
+    CTkLabel(head, text=icon,
+             font=CTkFont(size=16)).pack(side="left")
+    CTkLabel(head, text=text,
+             font=CTkFont(size=14, weight="bold"),
+             text_color=t.get("primary"),
+             anchor="w").pack(side="left", padx=(6, 0))
+
+    # Тонкий разделитель
+    CTkFrame(card, height=1,
+             fg_color=t.get("card_border")
+             ).pack(fill="x", padx=UI_PAD_CARD, pady=(0, 6))
+
+    # Строки настроек
+    for label, attr, kind, meta in items:
+        _render_setting_row(app, card, label, attr, kind, meta)
+
+    # Отступ снизу
+    CTkFrame(card, height=6,
+             fg_color="transparent").pack()
+
+def _render_setting_row(app: Any, parent: Any,
+                         label: str, attr: str,
+                         kind: str, meta: Any) -> None:
+    """Один пункт настройки: [Label] ......... [Control]."""
+    t = _t()
+
+    row = CTkFrame(parent, fg_color="transparent")
+    row.pack(fill="x", padx=UI_PAD_CARD, pady=4)
+
+    # Лейбл слева
+    CTkLabel(row, text=label,
+             font=CTkFont(size=12),
+             text_color=t.get("text"),
+             anchor="w"
+             ).pack(side="left", padx=(0, 12))
+
+    # Текущее значение из конфига
+    current = getattr(app.config_data, attr, None)
+
+    # ═══════════════════════════════════════════════════
+    # BOOL → CTkSwitch
+    # ═══════════════════════════════════════════════════
+    if kind == "bool":
+        var = BooleanVar(value=bool(current))
+
+        def _on_toggle() -> None:
+            val = bool(var.get())
+            setattr(app.config_data, attr, val)
             app.config_data.save()
-            if a == "api_enabled":
+
+            # Особые случаи
+            if attr == "api_enabled":
                 from nexus.integrations import api_server
-                if v.get():
+                if val:
                     ok, msg = api_server.start(
                         app.config_data.api_port)
                     app._show_toast(
@@ -3679,122 +3847,300 @@ def _page_settings(app: Any, parent: CTkFrame) -> None:
                     api_server.stop()
                     app._show_toast("📡 API остановлен",
                                       "info")
+            elif attr == "dev_mode":
+                app._show_toast(
+                    f"🔧 Dev {'ВКЛ' if val else 'ВЫКЛ'}",
+                    "info", 1500)
 
-        CTkCheckBox(card, text=label, variable=var,
-                    font=CTkFont(size=12),
-                    text_color=t.get("text"),
-                    fg_color=t.get("primary"),
-                    command=toggle
-                    ).pack(anchor="w", padx=UI_PAD_CARD,
-                            pady=4)
+        CTkSwitch(row, text="", variable=var,
+                  width=52, height=26,
+                  fg_color=t.get("bg3"),
+                  progress_color=t.get("success"),
+                  button_color=t.get("text"),
+                  button_hover_color=t.get("accent"),
+                  command=_on_toggle
+                  ).pack(side="right")
 
-    # ── БЕЗОПАСНОСТЬ ─────────────────────────────────
-    sec_card = app._section_card(
-        scroll, "🔒 БЕЗОПАСНОСТЬ", t.get("warning"))
-    CTkButton(sec_card, text="🔑 Сменить пароль",
-              height=38, width=240,
-              fg_color=t.get("primary"),
-              text_color=t.get("bg"),
-              command=lambda: _change_password_dialog(app)
-              ).pack(anchor="w", padx=UI_PAD_CARD, pady=8)
-    CTkButton(sec_card, text="📱 Мои устройства",
-              height=38, width=240,
-              fg_color=t.get("gradient2"),
-              text_color=t.get("bg"),
-              command=lambda: app._show_device_list()
-              if hasattr(app, "_show_device_list")
-              else app._show_toast("Скоро", "info")
-              ).pack(anchor="w", padx=UI_PAD_CARD, pady=8)
-    CTkButton(sec_card, text="🎫 API-токены",
-              height=38, width=240,
-              fg_color=t.get("accent"),
-              text_color=t.get("bg"),
-              command=lambda: app._show_api_tokens()
-              if hasattr(app, "_show_api_tokens")
-              else app._show_toast("Скоро", "info")
-              ).pack(anchor="w", padx=UI_PAD_CARD, pady=8)
-    CTkButton(sec_card, text="🚪 Забыть сессию",
-              height=34, width=240,
-              fg_color=t.get("warning"),
-              text_color=t.get("bg"),
-              command=lambda: _forget_session(app)
-              ).pack(anchor="w", padx=UI_PAD_CARD,
-                     pady=(6, UI_PAD_CARD))
+    # ═══════════════════════════════════════════════════
+    # SELECT → CTkOptionMenu
+    # ═══════════════════════════════════════════════════
+    elif kind == "select":
+        values = [str(x) for x in (meta or [])]
+        init = str(current) if current is not None \
+                else (values[0] if values else "")
+        if init not in values and values:
+            init = values[0]
+        var = StringVar(value=init)
 
-    # ── БД ───────────────────────────────────────────
-    db_card = app._section_card(
-        scroll, "💾 БАЗА ДАННЫХ", t.get("gradient1"))
-    stats = db.stats()
-    CTkLabel(db_card,
-             text=(f"schema v{db.schema_version()} · "
-                   f"tasks: {stats.get('tasks', 0)} · "
-                   f"users: {stats.get('users', 0)} · "
-                   f"размер: "
-                   f"{fmt_size(stats.get('db_size', 0))}"),
-             font=CTkFont(size=11),
+        def _on_select(choice: str) -> None:
+            setattr(app.config_data, attr, choice)
+            app.config_data.save()
+
+            # Особые случаи — переключение темы/языка
+            if attr == "theme":
+                _change_theme(app, choice)
+            elif attr == "language":
+                _change_language(app, choice)
+            elif attr == "qr_default_size":
+                with suppress(Exception):
+                    app.config_data.qr_default_size = int(choice)
+                    app.config_data.save()
+            else:
+                app._show_toast(
+                    f"✅ {label}: {choice}", "info", 1500)
+
+        CTkOptionMenu(row, values=values,
+                       variable=var,
+                       width=200, height=32,
+                       font=CTkFont(size=11),
+                       fg_color=t.get("bg3"),
+                       button_color=t.get("primary"),
+                       text_color=t.get("text"),
+                       command=_on_select
+                       ).pack(side="right")
+
+    # ═══════════════════════════════════════════════════
+    # INT → Entry + подсказка диапазона
+    # ═══════════════════════════════════════════════════
+    elif kind == "int":
+        lo, hi = meta if meta else (0, 999_999)
+
+        # Подсказка диапазона — справа от entry
+        CTkLabel(row, text=f"{lo}–{hi}",
+                 font=CTkFont(size=10),
+                 text_color=t.get("text_dim")
+                 ).pack(side="right", padx=(6, 0))
+
+        entry = CTkEntry(row, width=110, height=32,
+                          font=CTkFont(size=12),
+                          justify="right",
+                          fg_color=t.get("bg3"),
+                          border_color=t.get("card_border"),
+                          text_color=t.get("text"))
+        entry.pack(side="right")
+        entry.insert(0, str(current if current is not None
+                              else lo))
+
+        def _save_int(_e: Any = None) -> None:
+            try:
+                val = int(entry.get())
+            except (ValueError, TypeError):
+                val = current if current is not None else lo
+            val = max(lo, min(hi, val))
+            setattr(app.config_data, attr, val)
+            app.config_data.save()
+            entry.delete(0, "end")
+            entry.insert(0, str(val))
+
+        entry.bind("<FocusOut>", _save_int)
+        entry.bind("<Return>", _save_int)
+
+    # ═══════════════════════════════════════════════════
+    # PATH → Entry + 📂 кнопка
+    # ═══════════════════════════════════════════════════
+    elif kind == "path":
+        entry = CTkEntry(row, height=32,
+                          font=CTkFont(size=11),
+                          fg_color=t.get("bg3"),
+                          border_color=t.get("card_border"),
+                          text_color=t.get("text"))
+        entry.pack(side="left", fill="x", expand=True,
+                    padx=(0, 4))
+        entry.insert(0, str(current or ""))
+
+        def _save_path(_e: Any = None) -> None:
+            setattr(app.config_data, attr,
+                     entry.get().strip())
+            app.config_data.save()
+
+        def _choose_path() -> None:
+            from tkinter import filedialog as _fd
+            d = _fd.askdirectory(
+                parent=app,
+                title="Выберите папку")
+            if d:
+                entry.delete(0, "end")
+                entry.insert(0, d)
+                _save_path()
+                app._show_toast("📂 Путь выбран", "success",
+                                  1500)
+
+        CTkButton(row, text="📂", width=40, height=32,
+                  font=CTkFont(size=13),
+                  fg_color=t.get("accent"),
+                  text_color=t.get("bg"),
+                  command=_choose_path
+                  ).pack(side="right")
+        entry.bind("<FocusOut>", _save_path)
+
+    # ═══════════════════════════════════════════════════
+    # STR → обычный Entry
+    # ═══════════════════════════════════════════════════
+    elif kind == "str":
+        entry = CTkEntry(row, height=32,
+                          font=CTkFont(size=12),
+                          fg_color=t.get("bg3"),
+                          border_color=t.get("card_border"),
+                          text_color=t.get("text"))
+        entry.pack(side="left", fill="x", expand=True)
+        entry.insert(0, str(current or ""))
+
+        def _save_str(_e: Any = None) -> None:
+            setattr(app.config_data, attr,
+                     entry.get().strip())
+            app.config_data.save()
+
+        entry.bind("<FocusOut>", _save_str)
+        entry.bind("<Return>", _save_str)
+
+def _settings_reset(app: Any) -> None:
+    """Сбросить все настройки на дефолт."""
+    if not messagebox.askyesno(
+            "Сбросить настройки?",
+            "Все настройки вернутся к значениям по умолчанию.\n"
+            "Задачи, заметки и другие данные — НЕ удалятся.\n\n"
+            "Продолжить?"):
+        return
+    try:
+        from nexus.app import AppConfig
+        app.config_data = AppConfig()
+        app.config_data.save()
+        app._show_toast("↺ Настройки сброшены", "success",
+                          2500)
+        app._safe_after(300, app._refresh_page)
+    except Exception as e:
+        app._show_toast(f"❌ {e}", "error")
+
+
+def _settings_export(app: Any) -> None:
+    """Экспорт настроек в JSON-файл."""
+    import json
+    from tkinter import filedialog as _fd
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fp = _fd.asksaveasfilename(
+        parent=app,
+        defaultextension=".json",
+        initialfile=f"nexus_settings_{ts}.json",
+        title="Экспорт настроек",
+        filetypes=[("JSON", "*.json")])
+    if not fp:
+        return
+    try:
+        with open(fp, "w", encoding="utf-8") as f:
+            json.dump(app.config_data.__dict__, f,
+                      indent=2, ensure_ascii=False,
+                      default=str)
+        app._show_toast(
+            f"📤 {os.path.basename(fp)}", "success", 3000)
+    except Exception as e:
+        app._show_toast(f"❌ {e}", "error")
+
+
+def _settings_import(app: Any) -> None:
+    """Импорт настроек из JSON."""
+    import json
+    from tkinter import filedialog as _fd
+
+    fp = _fd.askopenfilename(
+        parent=app,
+        title="Импорт настроек",
+        filetypes=[("JSON", "*.json"), ("Все файлы", "*.*")])
+    if not fp:
+        return
+    if not messagebox.askyesno(
+            "Импорт настроек",
+            "Текущие настройки будут перезаписаны.\n"
+            "Продолжить?"):
+        return
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("Файл не содержит объект JSON")
+        applied = 0
+        for k, v in data.items():
+            if hasattr(app.config_data, k):
+                setattr(app.config_data, k, v)
+                applied += 1
+        app.config_data.save()
+        app._show_toast(
+            f"📥 Импортировано: {applied} настроек",
+            "success", 3000)
+        app._safe_after(300, app._refresh_page)
+    except Exception as e:
+        app._show_toast(f"❌ {e}", "error")
+
+def _render_danger_zone(app: Any, parent: Any) -> None:
+    """Опасные действия в самом низу настроек."""
+    t = _t()
+    card = CTkFrame(parent, corner_radius=10,
+                    border_width=2,
+                    border_color=t.get("error"),
+                    fg_color=t.get("bg2"))
+    card.pack(fill="x", pady=(UI_PAD_INNER, 20))
+
+    head = CTkFrame(card, fg_color="transparent")
+    head.pack(fill="x", padx=UI_PAD_CARD, pady=(12, 6))
+    CTkLabel(head, text="🚨",
+             font=CTkFont(size=16)).pack(side="left")
+    CTkLabel(head, text="ОПАСНАЯ ЗОНА",
+             font=CTkFont(size=14, weight="bold"),
+             text_color=t.get("error"),
+             anchor="w").pack(side="left", padx=(6, 0))
+
+    CTkLabel(card,
+             text="Эти действия необратимы. "
+                  "Дважды подумай перед нажатием.",
+             font=CTkFont(size=10, slant="italic"),
              text_color=t.get("text_dim"),
-             anchor="w").pack(anchor="w",
-                                padx=UI_PAD_CARD,
-                                pady=(0, 6))
+             anchor="w"
+             ).pack(anchor="w", padx=UI_PAD_CARD, pady=(0, 8))
 
-    fts_status = ("✅ FTS5 активен" if db.fts_available()
-                   else "⚠️ FTS5 fallback")
-    CTkLabel(db_card, text=fts_status,
-             font=CTkFont(size=11, weight="bold"),
-             text_color=(t.get("success") if db.fts_available()
-                          else t.get("warning")),
-             anchor="w").pack(anchor="w",
-                                padx=UI_PAD_CARD,
-                                pady=(0, 4))
+    actions = CTkFrame(card, fg_color="transparent")
+    actions.pack(fill="x", padx=UI_PAD_CARD, pady=(0, 12))
 
-    CTkButton(db_card, text="💾 Full backup сейчас",
-              height=32, width=200,
-              font=CTkFont(size=11, weight="bold"),
-              fg_color=t.get("success"),
-              text_color=t.get("bg"),
-              command=lambda: (
-                  db.backup(),
-                  app._show_toast("💾 Backup создан",
-                                    "success"))
-              ).pack(anchor="w", padx=UI_PAD_CARD,
-                     pady=(0, 6))
+    CTkButton(
+        actions, text="🗑️ Очистить историю QR",
+        width=220, height=34,
+        font=CTkFont(size=11, weight="bold"),
+        fg_color="transparent", border_width=1,
+        border_color=t.get("warning"),
+        text_color=t.get("warning"),
+        command=lambda: _danger_clear_qr_history(app)
+    ).pack(side="left", padx=4)
 
-    CTkButton(db_card, text="📦 Инкрементальный dump",
-              height=32, width=200,
-              font=CTkFont(size=11, weight="bold"),
-              fg_color=t.get("accent"),
-              text_color=t.get("bg"),
-              command=lambda: (
-                  db.incremental_backup(),
-                  app._show_toast("📦 SQL dump создан",
-                                    "success"))
-              ).pack(anchor="w", padx=UI_PAD_CARD,
-                     pady=(0, UI_PAD_CARD))
+    CTkButton(
+        actions, text="🔥 Сбросить кэш и перезапуск",
+        width=260, height=34,
+        font=CTkFont(size=11, weight="bold"),
+        fg_color="transparent", border_width=1,
+        border_color=t.get("error"),
+        text_color=t.get("error"),
+        command=lambda: _danger_restart(app)
+    ).pack(side="left", padx=4)
 
-    # ── QR ───────────────────────────────────────────
-    qr_card = app._section_card(
-        scroll, "📱 QR-СТУДИЯ", t.get("warning"))
-    cache_stats = qr_gen.cache_stats()
-    CTkLabel(qr_card,
-             text=f"Кэш: hit {cache_stats.get('hit', 0)} · "
-                  f"miss {cache_stats.get('miss', 0)}",
-             font=CTkFont(size=11),
-             text_color=t.get("text_dim"),
-             anchor="w").pack(anchor="w",
-                                padx=UI_PAD_CARD,
-                                pady=(0, 6))
-    CTkButton(qr_card, text="🗑️ Очистить кэш QR",
-              height=32, width=200,
-              font=CTkFont(size=11, weight="bold"),
-              fg_color=t.get("warning"),
-              text_color=t.get("bg"),
-              command=lambda: (
-                  qr_gen.clear_cache(),
-                  app._show_toast("🗑️ Кэш очищен",
-                                    "success"))
-              ).pack(anchor="w", padx=UI_PAD_CARD,
-                     pady=(0, UI_PAD_CARD))
 
+def _danger_clear_qr_history(app: Any) -> None:
+    if not messagebox.askyesno(
+            "Очистить историю QR?",
+            "Вся история QR-генераций будет удалена."):
+        return
+    try:
+        from nexus.qr import qr_history
+        n = qr_history.clear(app.current_user)
+        app._show_toast(f"🗑️ Удалено: {n}", "info")
+        app._refresh_page()
+    except Exception as e:
+        app._show_toast(f"❌ {e}", "error")
+
+
+def _danger_restart(app: Any) -> None:
+    if not messagebox.askyesno(
+            "Перезапустить NEXUS?",
+            "Приложение закроется. Запусти его снова вручную."):
+        return
+    app._on_closing()
 
 def _change_theme(app: Any, theme: str) -> None:
     from nexus.app import theme_manager
@@ -3889,6 +4235,86 @@ def _forget_session(app: Any) -> None:
         app.config_data.save()
         app._show_toast("🚪 Забыто", "success")
 
+
+# ═══════════════════════════════════════════════════════════
+# PAGE: SETTINGS
+# ═══════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+# SETTINGS — декларативное описание всех настроек
+# ═══════════════════════════════════════════════════════════
+# Каждая строка: (label, attr_name, kind, meta)
+#   kind = "bool"   → CTkSwitch                 (meta: None)
+#   kind = "select" → CTkOptionMenu             (meta: [варианты])
+#   kind = "int"    → CTkEntry (число)          (meta: (min, max))
+#   kind = "path"   → CTkEntry + 📂 кнопка      (meta: None)
+#   kind = "str"    → CTkEntry (текст)          (meta: None)
+# ═══════════════════════════════════════════════════════════
+
+SETTINGS_SECTIONS: List[Tuple[str, List[Tuple]]] = [
+    ("🎨 ВНЕШНИЙ ВИД", [
+        ("Тема",                  "theme",              "select",
+         ["dark", "light", "cyber", "sunset", "forest",
+          "ocean", "matrix_green"]),
+        ("Язык интерфейса",       "language",           "select",
+         ["ru", "en", "uk", "pl"]),
+        ("Размер шрифта кода",    "code_font_size",     "int",
+         (10, 20)),
+        ("Авто-тема (по системе)", "auto_theme",         "bool", None),
+        ("Авто-тема (по времени)", "auto_theme_time",    "bool", None),
+        ("Авто-определение языка", "auto_detect_language", "bool", None),
+    ]),
+
+    ("🔔 УВЕДОМЛЕНИЯ И ЗВУК", [
+        ("Уведомления-тосты",     "notifications",      "bool", None),
+        ("Звуковые эффекты",      "sound_effects",      "bool", None),
+        ("Длительность тоста (мс)", "toast_duration",   "int",
+         (1000, 10000)),
+        ("Напоминать о дедлайнах", "notify_deadlines",  "bool", None),
+    ]),
+
+    ("🔒 ПРИВАТНОСТЬ И БЕЗОПАСНОСТЬ", [
+        ("Автовыход при простое", "auto_logout_idle",   "bool", None),
+        ("Автоблокировка хранилища", "auto_lock_idle",  "bool", None),
+        ("Таймаут сессии (мин)",  "session_timeout",    "int",
+         (5, 480)),
+        ("Таймаут автоблокировки (мин)", "auto_lock_timeout", "int",
+         (1, 120)),
+        ("HIBP-проверка паролей", "hibp_check_enabled", "bool", None),
+        ("Запомнить меня по умолчанию", "remember_me",  "bool", None),
+    ]),
+
+    ("💻 CODE STUDIO", [
+        ("Автосохранение кода",   "code_auto_save",     "bool", None),
+        ("Подсветка синтаксиса",  "code_syntax_highlight", "bool", None),
+        ("Автосохранение черновиков", "autosave_drafts", "bool", None),
+        ("Язык по умолчанию",     "code_last_language", "select",
+         ["python", "javascript", "shell", "sql", "html",
+          "css", "json", "yaml"]),
+    ]),
+
+    ("📱 QR-СТУДИЯ", [
+        ("Live-preview",          "qr_live_preview",    "bool", None),
+        ("Размер по умолчанию",   "qr_default_size",    "select",
+         ["200", "300", "400", "500", "800", "1000"]),
+        ("Стиль по умолчанию",    "qr_default_style",   "select",
+         ["neon_cyan", "cyber_pink", "matrix_green",
+          "sunset_orange", "ocean_blue", "forest_green"]),
+    ]),
+
+    ("⚙️ СИСТЕМА", [
+        ("Автобэкап",             "auto_backup",        "bool", None),
+        ("Ежедневные квесты",     "quests_enabled",     "bool", None),
+        ("HTTP API",              "api_enabled",        "bool", None),
+        ("Порт API",              "api_port",           "int",
+         (1024, 65535)),
+        ("Dev-режим",             "dev_mode",           "bool", None),
+    ]),
+
+    ("☁️ СИНХРОНИЗАЦИЯ", [
+        ("Автосинхронизация",     "sync_auto",          "bool", None),
+        ("Путь для синхронизации", "sync_path",         "path", None),
+    ]),
+]
 
 # ═══════════════════════════════════════════════════════════
 # PAGE: EXPORT
@@ -3992,51 +4418,643 @@ def _page_vaults(app: Any, parent: CTkFrame) -> None:
     t = _t()
     scroll = CTkScrollableFrame(parent, fg_color=t.get("bg"))
     scroll.pack(fill="both", expand=True)
-    app._page_header(scroll, "ХРАНИЛИЩА", "💾", "")
+    app._page_header(scroll, "ХРАНИЛИЩА", "💾",
+                      "локальные изолированные папки")
     from nexus.integrations import VaultManager
 
-    name_e = CTkEntry(scroll,
+    # ── Создание ─────────────────────────────────────
+    create_row = CTkFrame(scroll, fg_color="transparent")
+    create_row.pack(fill="x", pady=UI_PAD_INNER)
+    name_e = CTkEntry(create_row,
                        placeholder_text="Имя хранилища",
                        height=UI_FORM_ENTRY_HEIGHT,
                        fg_color=t.get("bg3"),
                        border_color=t.get("card_border"),
                        text_color=t.get("text"))
-    name_e.pack(fill="x", pady=UI_PAD_INNER)
+    name_e.pack(side="left", fill="x", expand=True,
+                 padx=(0, 6))
 
     def create() -> None:
         n = name_e.get().strip()
         if not n:
+            app._show_toast("Введите имя", "warning")
             return
-        ok, msg = VaultManager.create_vault(n)
+        # Санитизация — на всякий случай
+        safe = sanitize_filename(n)
+        if safe != n:
+            app._show_toast(
+                f"⚠️ Имя заменено на «{safe}»", "info", 2500)
+        ok, msg = VaultManager.create_vault(safe)
         app._show_toast(
             f"{'✅' if ok else '❌'} {msg}",
             "success" if ok else "error")
         if ok:
+            name_e.delete(0, "end")
             app._refresh_page()
 
-    CTkButton(scroll, text="＋ Создать", height=38,
-              width=200,
+    CTkButton(create_row, text="＋ Создать", height=38,
+              width=160,
+              font=CTkFont(size=12, weight="bold"),
               fg_color=t.get("success"),
               text_color=t.get("bg"),
-              command=create
-              ).pack(anchor="w", pady=(0, UI_PAD_INNER))
+              command=create).pack(side="right")
+    name_e.bind("<Return>", lambda e: create())
 
-    for v in VaultManager.list_vaults():
-        card = CTkFrame(scroll, fg_color=t.get("bg2"),
-                         corner_radius=6)
-        card.pack(fill="x", pady=3)
-        CTkLabel(card, text=f"💾 {v['name']}",
-                 font=CTkFont(size=13, weight="bold"),
-                 text_color=t.get("primary"),
-                 anchor="w").pack(anchor="w", padx=10,
-                                    pady=(6, 2))
-        CTkLabel(card,
-                 text=f"{fmt_size(v['size'])} · "
-                      f"{v['mtime']:%d.%m.%Y %H:%M}",
-                 font=CTkFont(size=10),
+    # ── Список ───────────────────────────────────────
+    vaults = VaultManager.list_vaults()
+    if not vaults:
+        empty = app._section_card(
+            scroll, "💾 Пока нет хранилищ",
+            t.get("card_border"))
+        CTkLabel(empty,
+                 text="Создай первое хранилище выше — "
+                      "это изолированная папка для данных",
+                 font=CTkFont(size=12),
                  text_color=t.get("text_dim"),
-                 anchor="w").pack(anchor="w", padx=10,
-                                    pady=(0, 6))
+                 anchor="w").pack(anchor="w",
+                                    padx=UI_PAD_CARD,
+                                    pady=(0, UI_PAD_CARD))
+        return
+
+    for v in vaults:
+        _render_vault_card(app, scroll, v, VaultManager)
+
+
+def _render_vault_card(app: Any, parent: Any,
+                        v: Dict[str, Any],
+                        VaultManager: Any) -> None:
+    """Карточка одного хранилища с кнопками действий."""
+    t = _t()
+    card = CTkFrame(parent, fg_color=t.get("bg2"),
+                     corner_radius=8, border_width=1,
+                     border_color=t.get("card_border"))
+    card.pack(fill="x", pady=4)
+
+    # ── Заголовок ────────────────────────────────────
+    top = CTkFrame(card, fg_color="transparent")
+    top.pack(fill="x", padx=UI_PAD_CARD, pady=(8, 4))
+    CTkLabel(top, text=f"💾 {v['name']}",
+             font=CTkFont(size=14, weight="bold"),
+             text_color=t.get("primary"),
+             anchor="w").pack(side="left")
+    CTkLabel(top,
+             text=f"{fmt_size(v['size'])} · "
+                  f"{v['mtime']:%d.%m.%Y %H:%M}",
+             font=CTkFont(size=10),
+             text_color=t.get("text_dim"),
+             anchor="e").pack(side="right")
+
+    # ── Кнопки действий ──────────────────────────────
+    br = CTkFrame(card, fg_color="transparent")
+    br.pack(fill="x", padx=UI_PAD_CARD, pady=(4, 8))
+
+    CTkButton(
+        br, text="📂 Открыть", width=110, height=30,
+        font=CTkFont(size=11, weight="bold"),
+        fg_color=t.get("primary"),
+        text_color=t.get("bg"),
+        command=lambda n=v["name"]:
+            _vault_open(app, VaultManager, n)
+    ).pack(side="left", padx=2)
+
+    CTkButton(
+        br, text="📎 Файл", width=100, height=30,
+        font=CTkFont(size=11, weight="bold"),
+        fg_color=t.get("secondary"),
+        text_color=t.get("bg"),
+        command=lambda n=v["name"]:
+            _vault_upload_file(app, VaultManager, n)
+    ).pack(side="left", padx=2)
+
+    CTkButton(
+        br, text="📥 ZIP", width=90, height=30,
+        font=CTkFont(size=11, weight="bold"),
+        fg_color=t.get("accent"),
+        text_color=t.get("bg"),
+        command=lambda n=v["name"]:
+            _vault_extract_zip(app, VaultManager, n)
+    ).pack(side="left", padx=2)
+
+    CTkButton(
+        br, text="📄 Содержимое", width=140, height=30,
+        font=CTkFont(size=11, weight="bold"),
+        fg_color=t.get("warning"),
+        text_color=t.get("bg"),
+        command=lambda n=v["name"]:
+            _vault_show_contents(app, VaultManager, n)
+    ).pack(side="left", padx=2)
+
+    CTkButton(
+        br, text="✏️", width=44, height=30,
+        font=CTkFont(size=11, weight="bold"),
+        fg_color=t.get("text_dim"),
+        text_color=t.get("bg"),
+        command=lambda n=v["name"]:
+            _vault_rename(app, VaultManager, n)
+    ).pack(side="left", padx=2)
+
+    CTkButton(
+        br, text="🗑️", width=44, height=30,
+        font=CTkFont(size=11, weight="bold"),
+        fg_color=t.get("error"),
+        text_color=t.get("bg"),
+        command=lambda n=v["name"]:
+            _vault_delete(app, VaultManager, n)
+    ).pack(side="right", padx=2)
+
+    # ── Мини-превью содержимого ──────────────────────
+    try:
+        files = VaultManager.list_files(v["name"])
+    except Exception:
+        files = []
+
+    if files:
+        preview = CTkFrame(card, fg_color="transparent")
+        preview.pack(fill="x", padx=UI_PAD_CARD,
+                      pady=(0, 8))
+        CTkLabel(preview,
+                 text=f"📄 {len(files)} файлов:",
+                 font=CTkFont(size=10, weight="bold"),
+                 text_color=t.get("text_dim"),
+                 anchor="w").pack(anchor="w")
+
+        # Показываем первые 3 файла
+        for f in files[:3]:
+            ext = Path(f["name"]).suffix.lower()
+            icon = {
+                ".png": "🖼️", ".jpg": "🖼️", ".jpeg": "🖼️",
+                ".gif": "🖼️", ".webp": "🖼️", ".svg": "🎨",
+                ".pdf": "📕", ".txt": "📄", ".md": "📝",
+                ".zip": "📦", ".py": "💻", ".js": "💻",
+            }.get(ext, "📎")
+
+            frow = CTkFrame(preview, fg_color="transparent")
+            frow.pack(fill="x", pady=1)
+            CTkLabel(frow,
+                     text=f"  {icon} {truncate(f['name'], 40)}",
+                     font=CTkFont(size=11),
+                     text_color=t.get("text"),
+                     anchor="w").pack(side="left")
+            CTkLabel(frow, text=fmt_size(f["size"]),
+                     font=CTkFont(size=10),
+                     text_color=t.get("text_dim")
+                     ).pack(side="right")
+
+        if len(files) > 3:
+            CTkButton(
+                preview,
+                text=f"→ ещё {len(files) - 3} файлов",
+                height=22, width=180,
+                font=CTkFont(size=10),
+                fg_color="transparent",
+                text_color=t.get("accent"),
+                command=lambda n=v["name"]:
+                    _vault_show_contents(app, VaultManager, n)
+            ).pack(anchor="w", pady=(4, 0))
+    else:
+        # Пустое хранилище — показываем подсказку
+        CTkLabel(card, text="📭 Пусто — загрузи файл",
+                 font=CTkFont(size=10, slant="italic"),
+                 text_color=t.get("text_dim"),
+                 anchor="w").pack(anchor="w",
+                                    padx=UI_PAD_CARD,
+                                    pady=(0, 8))
+
+# ─── Действия над хранилищами ──────────────────────────
+
+def _vault_open(app: Any, VaultManager: Any,
+                 name: str) -> None:
+    """Открыть папку хранилища в системном менеджере."""
+    try:
+        from nexus.core import VAULTS_DIR
+        path = VAULTS_DIR / name
+        if not path.exists():
+            app._show_toast("❌ Папка не найдена", "error")
+            return
+        app._open_file(path)
+    except Exception as e:
+        app._show_toast(f"❌ {e}", "error")
+
+
+def _vault_export(app: Any, VaultManager: Any,
+                   name: str) -> None:
+    """Упаковать хранилище в ZIP."""
+    from tkinter import filedialog as _fd
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fp = _fd.asksaveasfilename(
+        parent=app,
+        defaultextension=".zip",
+        initialfile=f"vault_{name}_{ts}.zip",
+        filetypes=[("ZIP", "*.zip")])
+    if not fp:
+        return
+
+    def work() -> None:
+        try:
+            ok, msg = VaultManager.export_vault(name, fp)
+            app._safe_after(
+                0, app._show_toast,
+                f"{'✅' if ok else '❌'} {msg}",
+                "success" if ok else "error", 5000)
+        except Exception as e:
+            app._safe_after(0, app._show_toast,
+                              f"❌ {e}", "error")
+    executor.submit_safe(work)
+
+
+def _vault_rename(app: Any, VaultManager: Any,
+                   old_name: str) -> None:
+    """Диалог переименования."""
+    t = _t()
+    win = CTkToplevel(app)
+    win.title("✏️ Переименовать хранилище")
+    win.geometry("440x220")
+    win.configure(fg_color=t.get("bg"))
+    win.transient(app)
+    win.grab_set()
+    win.bind("<Escape>", lambda e: win.destroy())
+
+    CTkLabel(win, text="✏️ ПЕРЕИМЕНОВАТЬ",
+             font=CTkFont(size=16, weight="bold"),
+             text_color=t.get("warning")
+             ).pack(pady=(15, 4))
+    CTkLabel(win, text=f"Текущее: {old_name}",
+             font=CTkFont(size=11),
+             text_color=t.get("text_dim")
+             ).pack(pady=(0, 8))
+    e = CTkEntry(win, height=36, font=CTkFont(size=13),
+                  fg_color=t.get("bg3"),
+                  border_color=t.get("card_border"),
+                  text_color=t.get("text"))
+    e.pack(fill="x", padx=20, pady=6)
+    e.insert(0, old_name)
+    e.focus()
+    e.select_range(0, "end")
+
+    msg = CTkLabel(win, text="", font=CTkFont(size=11),
+                    text_color=t.get("error"))
+    msg.pack(pady=2)
+
+    def save() -> None:
+        new_name = sanitize_filename(e.get().strip())
+        if not new_name:
+            msg.configure(text="Пустое имя")
+            return
+        if new_name == old_name:
+            win.destroy()
+            return
+        ok, m = VaultManager.rename_vault(old_name, new_name)
+        if ok:
+            app._show_toast(f"✅ {new_name}", "success")
+            win.destroy()
+            app._refresh_page()
+        else:
+            msg.configure(text=f"❌ {m}")
+
+    bf = CTkFrame(win, fg_color="transparent")
+    bf.pack(fill="x", padx=20, pady=(6, 15))
+    CTkButton(bf, text="💾 Сохранить", height=36, width=150,
+              fg_color=t.get("success"),
+              text_color=t.get("bg"),
+              command=save).pack(side="left")
+    CTkButton(bf, text="❌ Отмена", height=36, width=120,
+              fg_color="transparent", border_width=1,
+              border_color=t.get("error"),
+              text_color=t.get("error"),
+              command=win.destroy).pack(side="left", padx=6)
+    e.bind("<Return>", lambda ev: save())
+
+
+def _vault_delete(app: Any, VaultManager: Any,
+                   name: str) -> None:
+    """Удалить хранилище с подтверждением и undo."""
+    if not messagebox.askyesno(
+            "Удалить хранилище?",
+            f"Удалить «{name}»?\n\n"
+            f"Данные будут упакованы в папку "
+            f"_trash/ и доступны для восстановления "
+            f"через Ctrl+Z."):
+        return
+    ok, msg = VaultManager.delete_vault(name, soft=True)
+    if not ok:
+        app._show_toast(f"❌ {msg}", "error")
+        return
+    app._show_toast("🗑️ Удалено (Ctrl+Z — отмена)",
+                      "info", 3000)
+
+    def undo() -> None:
+        try:
+            ok2, m2 = VaultManager.restore_vault(name)
+            if ok2:
+                app._show_toast("✅ Восстановлено",
+                                  "success")
+                app._refresh_page()
+            else:
+                app._show_toast(f"❌ {m2}", "error")
+        except Exception as e:
+            app._show_toast(f"❌ {e}", "error")
+
+    undo_stack.push(undo, f"vault:{name}")
+    app._refresh_page()
+
+# ─── Загрузка файла ────────────────────────────────────
+def _vault_upload_file(app: Any, VaultManager: Any,
+                        name: str) -> None:
+    """
+    Открыть системный диалог, выбрать файл,
+    скопировать его в хранилище.
+    """
+    from tkinter import filedialog as _fd
+
+    fp = _fd.askopenfilename(
+        parent=app,
+        title=f"Выберите файл для «{name}»",
+        filetypes=[
+            ("Все файлы", "*.*"),
+            ("Изображения", "*.png *.jpg *.jpeg *.gif *.webp *.svg"),
+            ("Документы", "*.pdf *.docx *.xlsx *.pptx *.txt *.md"),
+            ("Архивы", "*.zip *.tar *.gz *.7z"),
+            ("Код", "*.py *.js *.html *.css *.json *.sql"),
+        ])
+    if not fp:
+        return
+
+    # В фоне — чтобы UI не подвисал на больших файлах
+    def work() -> None:
+        try:
+            ok, msg = VaultManager.upload_file(name, fp)
+            app._safe_after(
+                0, app._show_toast,
+                f"{'📎' if ok else '❌'} {msg}",
+                "success" if ok else "error", 4000)
+            if ok:
+                # Обновим страницу через 200мс
+                app._safe_after(200, app._refresh_page)
+        except Exception as e:
+            app._safe_after(0, app._show_toast,
+                              f"❌ {e}", "error")
+
+    executor.submit_safe(work)
+
+# ─── Извлечение ZIP ────────────────────────────────────
+def _vault_extract_zip(app: Any, VaultManager: Any,
+                        name: str) -> None:
+    """Распаковать ZIP в хранилище."""
+    from tkinter import filedialog as _fd
+
+    fp = _fd.askopenfilename(
+        parent=app,
+        title=f"ZIP для «{name}»",
+        filetypes=[
+            ("ZIP-архивы", "*.zip"),
+            ("Все файлы", "*.*"),
+        ])
+    if not fp:
+        return
+
+    if not messagebox.askyesno(
+            "Распаковать?",
+            f"Распаковать «{Path(fp).name}» в «{name}»?\n\n"
+            f"Структура папок сохранится."):
+        return
+
+    def work() -> None:
+        try:
+            ok, msg = VaultManager.extract_zip(name, fp)
+            app._safe_after(
+                0, app._show_toast,
+                f"{'📥' if ok else '❌'} {msg}",
+                "success" if ok else "error", 5000)
+            if ok:
+                app._safe_after(200, app._refresh_page)
+        except Exception as e:
+            app._safe_after(0, app._show_toast,
+                              f"❌ {e}", "error")
+
+    executor.submit_safe(work)
+
+# ─── Просмотр содержимого ──────────────────────────────
+def _vault_show_contents(app: Any, VaultManager: Any,
+                          name: str) -> None:
+    """
+    Отдельное окно со списком файлов внутри хранилища.
+    Пересоздаётся при удалении/загрузке — простое решение.
+    """
+    t = _t()
+
+    # ── Окно ─────────────────────────────────────────
+    win = CTkToplevel(app)
+    win.title(f"📄 {name}")
+    win.geometry("820x640")
+    win.configure(fg_color=t.get("bg"))
+    win.transient(app)
+    win.grab_set()
+    win.bind("<Escape>", lambda e: win.destroy())
+
+    # ── Шапка ────────────────────────────────────────
+    head = CTkFrame(win, fg_color="transparent")
+    head.pack(fill="x", padx=15, pady=(15, 8))
+
+    files_info = VaultManager.list_files(name)
+    total_size = sum(f["size"] for f in files_info)
+
+    CTkLabel(head, text=f"📄 СОДЕРЖИМОЕ: {name}",
+             font=CTkFont(size=17, weight="bold"),
+             text_color=t.get("primary"),
+             anchor="w").pack(side="left")
+
+    CTkLabel(head,
+             text=f"{len(files_info)} файлов · "
+                  f"{fmt_size(total_size)}",
+             font=CTkFont(size=11),
+             text_color=t.get("text_dim")).pack(side="right")
+
+    # ── Кнопки сверху ────────────────────────────────
+    top_actions = CTkFrame(win, fg_color="transparent")
+    top_actions.pack(fill="x", padx=15, pady=(0, 8))
+
+    CTkButton(top_actions, text="📎 Загрузить файл",
+              height=32, width=170,
+              font=CTkFont(size=11, weight="bold"),
+              fg_color=t.get("secondary"),
+              text_color=t.get("bg"),
+              command=lambda: (
+                  win.destroy(),
+                  _vault_upload_file(app, VaultManager, name))
+              ).pack(side="left", padx=2)
+
+    CTkButton(top_actions, text="📥 Распаковать ZIP",
+              height=32, width=170,
+              font=CTkFont(size=11, weight="bold"),
+              fg_color=t.get("accent"),
+              text_color=t.get("bg"),
+              command=lambda: (
+                  win.destroy(),
+                  _vault_extract_zip(app, VaultManager, name))
+              ).pack(side="left", padx=2)
+
+    CTkButton(top_actions, text="📦 Экспорт ZIP",
+              height=32, width=150,
+              font=CTkFont(size=11, weight="bold"),
+              fg_color=t.get("warning"),
+              text_color=t.get("bg"),
+              command=lambda:
+                  _vault_export(app, VaultManager, name)
+              ).pack(side="left", padx=2)
+
+    CTkButton(top_actions, text="🔄",
+              height=32, width=44,
+              font=CTkFont(size=13, weight="bold"),
+              fg_color=t.get("primary"),
+              text_color=t.get("bg"),
+              command=lambda: (
+                  win.destroy(),
+                  _vault_show_contents(app, VaultManager, name))
+              ).pack(side="right", padx=2)
+
+    # ── Список файлов ────────────────────────────────
+    scroll = CTkScrollableFrame(win, fg_color=t.get("bg2"))
+    scroll.pack(fill="both", expand=True, padx=15,
+                 pady=(0, 15))
+
+    if not files_info:
+        CTkLabel(scroll,
+                 text="📭 Пока пусто\n\n"
+                      "Загрузи файл или распакуй ZIP",
+                 font=CTkFont(size=13),
+                 text_color=t.get("text_dim"),
+                 justify="center").pack(pady=40)
+        return
+
+    for f in files_info:
+        _render_vault_file_row(
+            app, scroll, name, f, VaultManager, win)
+
+def _render_vault_file_row(app: Any, parent: Any,
+                            vault_name: str,
+                            f: Dict[str, Any],
+                            VaultManager: Any,
+                            parent_win: Any) -> None:
+    """Одна строка-карточка файла в хранилище."""
+    t = _t()
+
+    # Иконка по расширению
+    ext = Path(f["name"]).suffix.lower()
+    icon_map = {
+        ".txt": "📄", ".md": "📝", ".pdf": "📕",
+        ".png": "🖼️", ".jpg": "🖼️", ".jpeg": "🖼️",
+        ".gif": "🖼️", ".webp": "🖼️", ".svg": "🎨",
+        ".mp3": "🎵", ".wav": "🎵", ".ogg": "🎵",
+        ".mp4": "🎬", ".mkv": "🎬", ".avi": "🎬",
+        ".zip": "📦", ".tar": "📦", ".gz": "📦",
+        ".py": "💻", ".js": "💻", ".html": "💻",
+        ".css": "💻", ".json": "💻", ".sql": "💻",
+        ".docx": "📘", ".xlsx": "📗", ".pptx": "📙",
+    }
+    icon = icon_map.get(ext, "📎")
+
+    row = CTkFrame(parent, fg_color=t.get("bg3"),
+                    corner_radius=6)
+    row.pack(fill="x", pady=2)
+
+    # Верхняя строка: имя + размер
+    top = CTkFrame(row, fg_color="transparent")
+    top.pack(fill="x", padx=10, pady=(6, 2))
+
+    CTkLabel(top, text=f"{icon} {f['name']}",
+             font=CTkFont(size=12, weight="bold"),
+             text_color=t.get("text"),
+             anchor="w").pack(side="left")
+
+    CTkLabel(top, text=fmt_size(f["size"]),
+             font=CTkFont(size=10),
+             text_color=t.get("text_dim")).pack(side="right")
+
+    # Нижняя строка: действия
+    sub = CTkFrame(row, fg_color="transparent")
+    sub.pack(fill="x", padx=10, pady=(0, 6))
+
+    CTkButton(
+        sub, text="📂 Открыть", width=100, height=26,
+        font=CTkFont(size=10, weight="bold"),
+        fg_color=t.get("primary"),
+        text_color=t.get("bg"),
+        command=lambda fn=f["name"]:
+            _vault_open_file(app, vault_name, fn)
+    ).pack(side="left", padx=2)
+
+    CTkButton(
+        sub, text="📍 Путь", width=80, height=26,
+        font=CTkFont(size=10),
+        fg_color="transparent",
+        border_width=1,
+        border_color=t.get("accent"),
+        text_color=t.get("accent"),
+        command=lambda fn=f["name"]:
+            _vault_show_path(app, vault_name, fn)
+    ).pack(side="left", padx=2)
+
+    CTkButton(
+        sub, text="🗑️", width=32, height=26,
+        font=CTkFont(size=10),
+        fg_color="transparent",
+        text_color=t.get("error"),
+        command=lambda fn=f["name"]: _vault_delete_file(
+            app, VaultManager, vault_name, fn, parent_win)
+    ).pack(side="right", padx=2)
+
+    CTkLabel(sub,
+             text=f["mtime"].strftime("%d.%m.%Y %H:%M"),
+             font=CTkFont(size=9),
+             text_color=t.get("text_dim")).pack(side="right",
+                                                  padx=6)
+
+def _vault_open_file(app: Any, vault_name: str,
+                      file_name: str) -> None:
+    """Открыть конкретный файл системным приложением."""
+    try:
+        from nexus.core import VAULTS_DIR
+        path = VAULTS_DIR / vault_name / file_name
+        if not path.exists():
+            app._show_toast("❌ Файл не найден", "error")
+            return
+        app._open_file(path)
+    except Exception as e:
+        app._show_toast(f"❌ {e}", "error")
+
+
+def _vault_show_path(app: Any, vault_name: str,
+                      file_name: str) -> None:
+    """Скопировать путь к файлу в буфер обмена."""
+    try:
+        from nexus.core import VAULTS_DIR, copy_to_clipboard
+        path = VAULTS_DIR / vault_name / file_name
+        if copy_to_clipboard(str(path)):
+            app._show_toast("📋 Путь скопирован",
+                              "success", 2000)
+    except Exception as e:
+        app._show_toast(f"❌ {e}", "error")
+
+def _vault_delete_file(app: Any, VaultManager: Any,
+                        vault_name: str, file_name: str,
+                        parent_win: Any) -> None:
+    """Удалить файл из хранилища (soft)."""
+    if not messagebox.askyesno(
+            "Удалить файл?",
+            f"Удалить «{file_name}»?\n\n"
+            f"Файл уйдёт в _trash/ — можно восстановить."):
+        return
+
+    ok, msg = VaultManager.delete_file(vault_name, file_name)
+    if ok:
+        app._show_toast("🗑️ Удалено", "info", 1500)
+        # Пересоздаём окно — так проще, чем инкрементально
+        # удалять строку из CTkScrollableFrame
+        with suppress(Exception):
+            parent_win.destroy()
+        _vault_show_contents(app, VaultManager, vault_name)
+    else:
+        app._show_toast(f"❌ {msg}", "error")
 
 
 # ═══════════════════════════════════════════════════════════

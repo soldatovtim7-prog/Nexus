@@ -266,57 +266,339 @@ class BackupManager:
 
 
 # ═══════════════════════════════════════════════════════════
-# VAULT MANAGER
+# VaultManager — управление локальными хранилищами
 # ═══════════════════════════════════════════════════════════
 class VaultManager:
-    @staticmethod
-    def list_vaults() -> List[Dict[str, Any]]:
-        try:
-            if not VAULTS_DIR.exists():
-                return []
-            vaults: List[Dict[str, Any]] = []
-            for v in VAULTS_DIR.iterdir():
-                if not v.is_dir():
-                    continue
-                db_file = v / "vault.db"
-                if not db_file.exists():
-                    continue
-                try:
-                    st = db_file.stat()
-                    vaults.append({
-                        "name": v.name, "path": v,
-                        "size": st.st_size,
-                        "mtime": datetime.fromtimestamp(
-                            st.st_mtime)})
-                except Exception:
-                    pass
-            return sorted(vaults, key=lambda x: x["mtime"],
-                          reverse=True)
-        except Exception:
-            return []
+    """
+    Хранилища — это изолированные папки внутри nexus_data/vaults/.
+    Soft-delete: удалённые уходят в nexus_data/_trash/ с таймстампом.
+    """
 
+    # ── Создание ──────────────────────────────────────
     @staticmethod
     def create_vault(name: str) -> Tuple[bool, str]:
         try:
-            safe = sanitize_filename(name, 50)
-            if not safe or safe in (".", ".."):
-                return False, "Неверное имя"
-            path = VAULTS_DIR / safe
+            from nexus.core import VAULTS_DIR
+            VAULTS_DIR.mkdir(parents=True, exist_ok=True)
+            path = VAULTS_DIR / name
             if path.exists():
-                return False, "Уже существует"
-            path.mkdir(parents=True)
-            with suppress(Exception):
-                vdb = sqlite3.connect(str(path / "vault.db"))
-                vdb.execute(
-                    "CREATE TABLE IF NOT EXISTS meta "
-                    "(k TEXT PRIMARY KEY, v TEXT)")
-                vdb.execute(
-                    "INSERT INTO meta VALUES ('created', ?)",
-                    (now_iso(),))
-                vdb.commit()
-                vdb.close()
-            return True, f"Хранилище «{safe}» создано"
+                return False, f"Хранилище «{name}» уже существует"
+            path.mkdir()
+            # README, чтобы папка не была пустой
+            try:
+                (path / "README.txt").write_text(
+                    f"Vault: {name}\n"
+                    f"Created: {datetime.now():%Y-%m-%d %H:%M:%S}\n",
+                    encoding="utf-8")
+            except Exception:
+                pass
+            logger.info(f"Vault created: {name}")
+            return True, f"Создано: {name}"
         except Exception as e:
+            logger.error(f"create_vault: {e}")
+            return False, str(e)
+
+    # ── Список ────────────────────────────────────────
+    @staticmethod
+    def list_vaults() -> List[Dict[str, Any]]:
+        try:
+            from nexus.core import VAULTS_DIR
+            if not VAULTS_DIR.exists():
+                return []
+            items: List[Dict[str, Any]] = []
+            for p in sorted(VAULTS_DIR.iterdir()):
+                if not p.is_dir():
+                    continue
+                size = 0
+                try:
+                    size = sum(
+                        f.stat().st_size for f in p.rglob("*")
+                        if f.is_file())
+                except Exception:
+                    pass
+                items.append({
+                    "name": p.name,
+                    "path": str(p),
+                    "size": size,
+                    "mtime": datetime.fromtimestamp(
+                        p.stat().st_mtime),
+                })
+            return items
+        except Exception as e:
+            logger.error(f"list_vaults: {e}")
+            return []
+
+    # ── Переименование ────────────────────────────────
+    @staticmethod
+    def rename_vault(old_name: str,
+                     new_name: str) -> Tuple[bool, str]:
+        try:
+            from nexus.core import VAULTS_DIR
+            src = VAULTS_DIR / old_name
+            dst = VAULTS_DIR / new_name
+            if not src.exists():
+                return False, "Исходное хранилище не найдено"
+            if dst.exists():
+                return False, "Хранилище с таким именем уже есть"
+            src.rename(dst)
+            logger.info(f"Vault renamed: {old_name} → {new_name}")
+            return True, new_name
+        except Exception as e:
+            logger.error(f"rename_vault: {e}")
+            return False, str(e)
+
+    # ── Удаление (soft) ───────────────────────────────
+    @staticmethod
+    def delete_vault(name: str,
+                     soft: bool = True) -> Tuple[bool, str]:
+        try:
+            import shutil
+            from nexus.core import VAULTS_DIR, TRASH_DIR
+            src = VAULTS_DIR / name
+            if not src.exists():
+                return False, "Не найдено"
+            if soft:
+                TRASH_DIR.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                dst = TRASH_DIR / f"{name}_{ts}"
+                shutil.move(str(src), str(dst))
+            else:
+                shutil.rmtree(src)
+            logger.info(f"Vault deleted: {name} (soft={soft})")
+            return True, "OK"
+        except Exception as e:
+            logger.error(f"delete_vault: {e}")
+            return False, str(e)
+
+    # ── Восстановление из _trash ──────────────────────
+    @staticmethod
+    def restore_vault(name: str) -> Tuple[bool, str]:
+        try:
+            import shutil
+            from nexus.core import VAULTS_DIR, TRASH_DIR
+            if not TRASH_DIR.exists():
+                return False, "Корзина пуста"
+            candidates = sorted(
+                [p for p in TRASH_DIR.iterdir()
+                 if p.is_dir() and p.name.startswith(f"{name}_")],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True)
+            if not candidates:
+                return False, "Не найдено в корзине"
+            src = candidates[0]
+            dst = VAULTS_DIR / name
+            if dst.exists():
+                return False, "Хранилище с таким именем уже есть"
+            shutil.move(str(src), str(dst))
+            return True, "OK"
+        except Exception as e:
+            logger.error(f"restore_vault: {e}")
+            return False, str(e)
+
+    # ── Экспорт в ZIP ─────────────────────────────────
+    @staticmethod
+    def export_vault(name: str,
+                     out_path: str) -> Tuple[bool, str]:
+        try:
+            import zipfile
+            from nexus.core import VAULTS_DIR
+            src = VAULTS_DIR / name
+            if not src.exists():
+                return False, "Не найдено"
+            with zipfile.ZipFile(out_path, "w",
+                                  zipfile.ZIP_DEFLATED) as z:
+                for f in src.rglob("*"):
+                    if f.is_file():
+                        z.write(f, f.relative_to(src.parent))
+            logger.info(f"Vault exported: {name} → {out_path}")
+            return True, "OK"
+        except Exception as e:
+            logger.error(f"export_vault: {e}")
+            return False, str(e)
+
+
+    # ── Загрузка файла ────────────────────────────────
+    @staticmethod
+    def upload_file(vault_name: str,
+                     src_path: str) -> Tuple[bool, str]:
+        """
+        Скопировать файл в хранилище.
+
+        Args:
+            vault_name: имя хранилища (папки внутри VAULTS_DIR)
+            src_path:   путь к файлу-источнику
+
+        Returns:
+            (True, "имя файла → vault") при успехе
+            (False, "причина") при ошибке
+        """
+        try:
+            import shutil
+            from nexus.core import VAULTS_DIR
+
+            src = Path(src_path)
+            if not src.exists():
+                return False, "Файл не найден"
+            if not src.is_file():
+                return False, "Это не файл (папки пока не поддержаны)"
+
+            dst_dir = VAULTS_DIR / vault_name
+            if not dst_dir.exists():
+                return False, f"Хранилище «{vault_name}» не найдено"
+
+            dst = dst_dir / src.name
+            # Если файл с таким именем уже есть —
+            # добавляем таймстамп к имени
+            if dst.exists():
+                stem = src.stem
+                suffix = src.suffix
+                ts = datetime.now().strftime("%H%M%S")
+                dst = dst_dir / f"{stem}_{ts}{suffix}"
+
+            # copy2 сохраняет метаданные (mtime, права)
+            shutil.copy2(str(src), str(dst))
+
+            logger.info(
+                f"Vault upload: {src.name} → {vault_name}")
+            return True, f"{src.name} → {vault_name}"
+
+        except PermissionError:
+            return False, "Нет прав на запись"
+        except Exception as e:
+            logger.error(f"upload_file: {e}")
+            return False, str(e)
+
+    # ── Извлечение ZIP ────────────────────────────────
+    @staticmethod
+    def extract_zip(vault_name: str,
+                     zip_path: str) -> Tuple[bool, str]:
+        """
+        Распаковать ZIP-архив в хранилище.
+
+        Безопасно: защита от Zip Slip (path traversal).
+        Структура папок внутри архива сохраняется.
+        """
+        try:
+            import zipfile
+            from nexus.core import VAULTS_DIR
+
+            zp = Path(zip_path)
+            if not zp.exists():
+                return False, "ZIP-файл не найден"
+            if not zp.is_file():
+                return False, "Это не файл"
+
+            if not zipfile.is_zipfile(str(zp)):
+                return False, "Не похоже на ZIP-архив"
+
+            dst_dir = VAULTS_DIR / vault_name
+            if not dst_dir.exists():
+                return False, f"Хранилище «{vault_name}» не найдено"
+
+            extracted = 0
+            skipped = 0
+
+            with zipfile.ZipFile(str(zp), "r") as z:
+                for member in z.namelist():
+                    # ── Защита от Zip Slip ──────────
+                    # Злоумышленник может положить в архив
+                    # файл с именем "../../etc/passwd".
+                    # Проверяем, что итоговый путь
+                    # остаётся внутри dst_dir.
+                    target = (dst_dir / member).resolve()
+                    dst_resolved = dst_dir.resolve()
+
+                    if not str(target).startswith(
+                            str(dst_resolved)):
+                        logger.warning(
+                            f"ZIP slip заблокирован: {member}")
+                        skipped += 1
+                        continue
+
+                    z.extract(member, str(dst_dir))
+                    extracted += 1
+
+            msg = f"Извлечено: {extracted}"
+            if skipped:
+                msg += f" (пропущено: {skipped})"
+            logger.info(
+                f"Vault extract_zip: {zp.name} → "
+                f"{vault_name} ({extracted} файлов)")
+            return True, msg
+
+        except zipfile.BadZipFile:
+            return False, "Повреждённый ZIP"
+        except Exception as e:
+            logger.error(f"extract_zip: {e}")
+            return False, str(e)
+
+    # ── Список файлов ─────────────────────────────────
+    @staticmethod
+    def list_files(vault_name: str) -> List[Dict[str, Any]]:
+        """
+        Вернуть список файлов внутри хранилища
+        (рекурсивно, включая подпапки).
+
+        Returns:
+            [{"name": "rel/path.png",
+              "size": 12345,
+              "mtime": datetime}, ...]
+        """
+        try:
+            from nexus.core import VAULTS_DIR
+
+            root = VAULTS_DIR / vault_name
+            if not root.exists():
+                return []
+
+            files: List[Dict[str, Any]] = []
+            for f in sorted(root.rglob("*")):
+                if not f.is_file():
+                    continue
+                rel = f.relative_to(root)
+                st = f.stat()
+                files.append({
+                    "name": str(rel),
+                    "size": st.st_size,
+                    "mtime": datetime.fromtimestamp(st.st_mtime),
+                })
+            return files
+        except Exception as e:
+            logger.error(f"list_files: {e}")
+            return []
+
+    # ── Удаление файла (soft — в _trash) ──────────────
+    @staticmethod
+    def delete_file(vault_name: str,
+                     file_name: str) -> Tuple[bool, str]:
+        """
+        Удалить файл из хранилища.
+        Soft-delete: файл уходит в nexus_data/_trash/
+        с префиксом vault__<vault>__<имя>_<ts>.
+        """
+        try:
+            import shutil
+            from nexus.core import VAULTS_DIR, TRASH_DIR
+
+            src = VAULTS_DIR / vault_name / file_name
+            if not src.exists():
+                return False, "Файл не найден"
+            if not src.is_file():
+                return False, "Это не файл"
+
+            TRASH_DIR.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_name = Path(file_name).name  # без ../..
+            dst = (TRASH_DIR /
+                   f"{vault_name}__{safe_name}_{ts}")
+
+            shutil.move(str(src), str(dst))
+            logger.info(
+                f"Vault delete_file: {vault_name}/{file_name}")
+            return True, "OK"
+
+        except Exception as e:
+            logger.error(f"delete_file: {e}")
             return False, str(e)
 
 

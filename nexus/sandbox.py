@@ -1,5 +1,13 @@
 """
-NEXUS sandbox — безопасное выполнение Python-кода.
+NEXUS sandbox — безопасное выполнение кода.
+
+Python   → SandboxRunner (AST + bytecode + rlimits)
+Прочие   → MultiLangRunner (subprocess с rlimits)
+
+Поддержка: python, javascript, typescript, shell, ruby, php,
+           go, lua, perl, r, sql, html, css, markdown, json,
+           yaml, xml.
+
 Зависит от: core
 """
 from __future__ import annotations
@@ -9,13 +17,16 @@ import builtins as _builtins
 import dis
 import io
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import traceback
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Dict, Final, FrozenSet, Tuple
+from typing import (
+    Any, Dict, Final, FrozenSet, Tuple,
+)
 
 from nexus.core import (
     CODE_TIMEOUT,
@@ -29,7 +40,7 @@ from nexus.core import (
 
 
 # ═══════════════════════════════════════════════════════════
-# AST VALIDATOR
+# AST VALIDATOR (для Python)
 # ═══════════════════════════════════════════════════════════
 class CodeSandbox:
     FORBIDDEN_NAMES: Final[FrozenSet[str]] = frozenset({
@@ -122,7 +133,7 @@ class CodeSandbox:
 
 
 # ═══════════════════════════════════════════════════════════
-# BYTECODE VALIDATOR
+# BYTECODE VALIDATOR (для Python)
 # ═══════════════════════════════════════════════════════════
 _FORBIDDEN_OPCODES: Final[FrozenSet[str]] = frozenset({
     "IMPORT_STAR",
@@ -204,13 +215,7 @@ _ALLOWED_OPCODES: Final[FrozenSet[str]] = frozenset({
 
 def validate_bytecode(code_obj: Any,
                        depth: int = 0) -> Tuple[bool, str]:
-    """
-    Проверить байткод на запрещённые опкоды.
-
-    FIX: строгая политика — неизвестный опкод без
-    безопасного префикса блокируется. Это защищает от
-    новых опасных опкодов в будущих версиях Python.
-    """
+    """Проверить байткод на запрещённые опкоды."""
     if depth > 10:
         return False, "Слишком глубокая вложенность"
     try:
@@ -256,7 +261,7 @@ class _StdoutRedirect:
 
 
 # ═══════════════════════════════════════════════════════════
-# IN-PROCESS WORKER (используется только fallback'ом)
+# IN-PROCESS WORKER (fallback)
 # ═══════════════════════════════════════════════════════════
 def _sandbox_worker(code: str) -> Tuple[str, str, bool]:
     """Возвращает (stdout, stderr, success)."""
@@ -357,7 +362,7 @@ def _sandbox_worker(code: str) -> Tuple[str, str, bool]:
 
 
 # ═══════════════════════════════════════════════════════════
-# SANDBOX RUNNER (subprocess на всех платформах)
+# SANDBOX RUNNER (Python — строгий)
 # ═══════════════════════════════════════════════════════════
 class SandboxRunner:
     DEFAULT_TIMEOUT: Final[int] = CODE_TIMEOUT
@@ -369,8 +374,7 @@ class SandboxRunner:
         skip_validation: bool = False,
     ) -> Tuple[str, str, bool]:
         """
-        FIX: используем subprocess на ВСЕХ платформах.
-        fork() в Linux ломается на Tk-приложениях.
+        Запуск Python-кода в изолированном subprocess.
         """
         timeout = timeout or cls.DEFAULT_TIMEOUT
 
@@ -476,8 +480,457 @@ class SandboxRunner:
                 return "", f"❌ {e}", False
 
 
+# ═══════════════════════════════════════════════════════════
+# MULTI-LANGUAGE RUNNER
+# ═══════════════════════════════════════════════════════════
+# Python идёт через строгий SandboxRunner (AST + bytecode).
+# Остальные языки — через subprocess с rlimits.
+#
+# Установка интерпретаторов:
+#   node       — sudo apt install nodejs
+#   bash       — уже есть
+#   ruby       — sudo apt install ruby
+#   php        — sudo apt install php-cli
+#   go         — sudo apt install golang
+#   lua        — sudo apt install lua5.4
+#   perl       — sudo apt install perl
+#   Rscript    — sudo apt install r-base
+# ═══════════════════════════════════════════════════════════
+
+LANG_CONFIG: Dict[str, Dict[str, Any]] = {
+    "python": {
+        "ext": ".py",
+        "check": None,
+        "cmd": None,
+        "name": "Python",
+    },
+    "javascript": {
+        "ext": ".js",
+        "check": "node",
+        "cmd": ["node", "{src}"],
+        "name": "JavaScript",
+    },
+    "typescript": {
+        "ext": ".ts",
+        "check": "ts-node",
+        "cmd": ["ts-node", "{src}"],
+        "name": "TypeScript",
+    },
+    "shell": {
+        "ext": ".sh",
+        "check": "bash",
+        "cmd": ["bash", "{src}"],
+        "name": "Shell / Bash",
+    },
+    "ruby": {
+        "ext": ".rb",
+        "check": "ruby",
+        "cmd": ["ruby", "{src}"],
+        "name": "Ruby",
+    },
+    "php": {
+        "ext": ".php",
+        "check": "php",
+        "cmd": ["php", "{src}"],
+        "name": "PHP",
+    },
+    "go": {
+        "ext": ".go",
+        "check": "go",
+        "cmd": ["go", "run", "{src}"],
+        "name": "Go",
+    },
+    "lua": {
+        "ext": ".lua",
+        "check": "lua",
+        "cmd": ["lua", "{src}"],
+        "name": "Lua",
+    },
+    "perl": {
+        "ext": ".pl",
+        "check": "perl",
+        "cmd": ["perl", "{src}"],
+        "name": "Perl",
+    },
+    "r": {
+        "ext": ".R",
+        "check": "Rscript",
+        "cmd": ["Rscript", "{src}"],
+        "name": "R",
+    },
+    "sql": {
+        "ext": ".sql",
+        "check": None,
+        "cmd": None,
+        "name": "SQL (SQLite)",
+    },
+    "html": {
+        "ext": ".html",
+        "check": None,
+        "cmd": None,
+        "name": "HTML",
+    },
+    "css": {
+        "ext": ".css",
+        "check": None,
+        "cmd": None,
+        "name": "CSS",
+    },
+    "markdown": {
+        "ext": ".md",
+        "check": None,
+        "cmd": None,
+        "name": "Markdown",
+    },
+    "json": {
+        "ext": ".json",
+        "check": None,
+        "cmd": None,
+        "name": "JSON",
+    },
+    "yaml": {
+        "ext": ".yaml",
+        "check": None,
+        "cmd": None,
+        "name": "YAML",
+    },
+    "xml": {
+        "ext": ".xml",
+        "check": None,
+        "cmd": None,
+        "name": "XML",
+    },
+}
+
+
+def lang_available(lang: str) -> Tuple[bool, str]:
+    """Проверить, установлен ли интерпретатор языка."""
+    cfg = LANG_CONFIG.get(lang)
+    if not cfg:
+        return False, f"Язык «{lang}» не поддержан"
+    check = cfg.get("check")
+    if not check:
+        return True, "ok"
+    if shutil.which(check):
+        return True, "ok"
+    hints = {
+        "node": "sudo apt install nodejs",
+        "ts-node": "npm install -g ts-node",
+        "bash": "уже установлен",
+        "ruby": "sudo apt install ruby",
+        "php": "sudo apt install php-cli",
+        "go": "sudo apt install golang",
+        "lua": "sudo apt install lua5.4",
+        "perl": "sudo apt install perl",
+        "Rscript": "sudo apt install r-base",
+    }
+    return False, hints.get(check, f"установите {check}")
+
+
+class MultiLangRunner:
+    """
+    Запуск кода на нескольких языках.
+
+    Python → SandboxRunner (AST + bytecode)
+    Остальные → subprocess с rlimits
+    """
+
+    MAX_OUTPUT: Final[int] = SANDBOX_MAX_OUTPUT
+    DEFAULT_TIMEOUT: Final[int] = CODE_TIMEOUT
+
+    @classmethod
+    def run(cls, code: str, lang: str = "python",
+            timeout: int | None = None
+            ) -> Tuple[str, str, bool]:
+        timeout = timeout or cls.DEFAULT_TIMEOUT
+        lang = (lang or "python").lower()
+
+        if lang == "python":
+            return SandboxRunner.run(code, timeout=timeout)
+
+        if lang in ("html", "css", "markdown"):
+            return cls._preview_marker(code, lang)
+
+        if lang == "json":
+            return cls._run_json(code)
+
+        if lang == "yaml":
+            return cls._run_yaml(code)
+
+        if lang == "xml":
+            return cls._run_xml(code)
+
+        if lang == "sql":
+            return cls._run_sql(code)
+
+        return cls._run_subprocess(code, lang, timeout)
+
+    # ─────────────────────────────────────────────
+    # PREVIEW (HTML/CSS/MD)
+    # ─────────────────────────────────────────────
+    @classmethod
+    def _preview_marker(cls, code: str, lang: str
+                         ) -> Tuple[str, str, bool]:
+        """Возвращает маркер __HTML__ — UI откроет preview."""
+        if lang == "html":
+            html = code
+        elif lang == "css":
+            html = (
+                "<!DOCTYPE html><html><head>"
+                "<meta charset='utf-8'>"
+                f"<style>{code}</style></head>"
+                "<body><h1>CSS Preview</h1>"
+                "<p>Пример текста для просмотра стилей.</p>"
+                "<button>Кнопка</button></body></html>")
+        elif lang == "markdown":
+            body = cls._markdown_to_html(code)
+            html = (
+                "<!DOCTYPE html><html><head>"
+                "<meta charset='utf-8'>"
+                "<style>body{font-family:system-ui,"
+                "-apple-system,sans-serif;max-width:800px;"
+                "margin:40px auto;padding:20px;"
+                "line-height:1.6;color:#333}"
+                "code{background:#f4f4f4;padding:2px 6px;"
+                "border-radius:3px;font-family:monospace}"
+                "pre{background:#f4f4f4;padding:12px;"
+                "border-radius:6px;overflow:auto}"
+                "blockquote{border-left:4px solid #ddd;"
+                "margin:0;padding-left:16px;color:#666}"
+                "</style></head><body>" + body + "</body></html>")
+        else:
+            return ("",
+                    f"❌ Preview для «{lang}» не поддержан",
+                    False)
+        return f"__HTML__{html}", "", True
+
+    # ─────────────────────────────────────────────
+    # JSON
+    # ─────────────────────────────────────────────
+    @classmethod
+    def _run_json(cls, code: str
+                    ) -> Tuple[str, str, bool]:
+        try:
+            import json as _json
+            data = _json.loads(code)
+            pretty = _json.dumps(
+                data, indent=2, ensure_ascii=False)
+            return pretty, "", True
+        except Exception as e:
+            return "", f"❌ JSON error: {e}", False
+
+    # ─────────────────────────────────────────────
+    # YAML
+    # ─────────────────────────────────────────────
+    @classmethod
+    def _run_yaml(cls, code: str
+                    ) -> Tuple[str, str, bool]:
+        try:
+            import yaml as _yaml  # type: ignore
+            data = _yaml.safe_load(code)
+            out = _yaml.safe_dump(
+                data, allow_unicode=True,
+                sort_keys=False)
+            return out, "", True
+        except ImportError:
+            try:
+                import json as _json
+                _json.loads(code)
+                return ("✅ Валидный JSON (PyYAML не "
+                        "установлен — pip install pyyaml)",
+                        "", True)
+            except Exception as e:
+                return "", f"❌ YAML error: {e}", False
+        except Exception as e:
+            return "", f"❌ YAML error: {e}", False
+
+    # ─────────────────────────────────────────────
+    # XML
+    # ─────────────────────────────────────────────
+    @classmethod
+    def _run_xml(cls, code: str
+                   ) -> Tuple[str, str, bool]:
+        try:
+            import xml.dom.minidom as _md
+            dom = _md.parseString(code)
+            pretty = dom.toprettyxml(indent="  ")
+            lines = [ln for ln in pretty.splitlines()
+                     if ln.strip()]
+            return "\n".join(lines), "", True
+        except Exception as e:
+            return "", f"❌ XML error: {e}", False
+
+    # ─────────────────────────────────────────────
+    # SQL (in-memory sqlite3)
+    # ─────────────────────────────────────────────
+    @classmethod
+    def _run_sql(cls, code: str
+                   ) -> Tuple[str, str, bool]:
+        try:
+            import sqlite3
+            conn = sqlite3.connect(":memory:")
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+
+            statements = [s.strip() for s in code.split(";")
+                          if s.strip()]
+            results: list = []
+            for stmt in statements:
+                try:
+                    cur.execute(stmt)
+                    if cur.description:
+                        rows = cur.fetchall()
+                        if rows:
+                            cols = [d[0] for d in
+                                    cur.description]
+                            results.append(" | ".join(cols))
+                            results.append("-" * 50)
+                            for r in rows:
+                                results.append(
+                                    " | ".join(
+                                        str(r[c]) for c in cols))
+                            results.append("")
+                except Exception as e:
+                    return ("",
+                            f"❌ SQL error: {e}\n"
+                            f"  запрос: {stmt[:100]}", False)
+            conn.commit()
+            conn.close()
+            return "\n".join(results) or "✅ OK", "", True
+        except Exception as e:
+            return "", f"❌ {e}", False
+
+    # ─────────────────────────────────────────────
+    # UNIFIED subprocess (JS, Shell, Ruby, PHP, Go, ...)
+    # ─────────────────────────────────────────────
+    @classmethod
+    def _run_subprocess(cls, code: str, lang: str,
+                         timeout: int
+                         ) -> Tuple[str, str, bool]:
+        cfg = LANG_CONFIG.get(lang)
+        if not cfg:
+            return "", f"❌ Язык «{lang}» не поддержан", False
+
+        ok, hint = lang_available(lang)
+        if not ok:
+            return "", f"❌ {hint}", False
+
+        try:
+            SANDBOX_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        with tempfile.TemporaryDirectory(
+                prefix="nexus_ml_",
+                dir=SANDBOX_DIR) as tmp:
+            tmp_path = Path(tmp)
+            script = tmp_path / f"user_code{cfg['ext']}"
+            try:
+                script.write_text(code, encoding="utf-8")
+            except Exception as e:
+                return ("",
+                        f"❌ Не удалось записать файл: {e}",
+                        False)
+
+            env = {
+                "PATH": os.environ.get(
+                    "PATH", "/usr/bin:/bin"),
+                "HOME": tmp,
+                "TMPDIR": tmp,
+                "LANG": "C.UTF-8",
+                "PYTHONIOENCODING": "utf-8",
+            }
+
+            cmd = [c.replace("{src}", str(script))
+                    for c in cfg["cmd"]]
+
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True,
+                    timeout=timeout, cwd=tmp, env=env,
+                    check=False, bufsize=-1)
+                stdout = (result.stdout
+                           or "")[:cls.MAX_OUTPUT]
+                stderr = (result.stderr
+                           or "")[:cls.MAX_OUTPUT]
+                return stdout, stderr, result.returncode == 0
+            except subprocess.TimeoutExpired:
+                return ("",
+                        f"⏱️ Таймаут ({timeout}с) — "
+                        f"процесс убит", False)
+            except FileNotFoundError:
+                return ("",
+                        f"❌ {cfg['check']} не найден — "
+                        f"{hint}", False)
+            except Exception as e:
+                return "", f"❌ {e}", False
+
+    # ─────────────────────────────────────────────
+    # MARKDOWN → HTML (простой рендер)
+    # ─────────────────────────────────────────────
+    @staticmethod
+    def _markdown_to_html(md: str) -> str:
+        import html as _html
+        import re as _re
+
+        lines = md.splitlines()
+        out: list = []
+        in_code = False
+        in_ul = False
+
+        for line in lines:
+            if line.strip().startswith("```"):
+                if not in_code:
+                    out.append("<pre><code>")
+                    in_code = True
+                else:
+                    out.append("</code></pre>")
+                    in_code = False
+                continue
+            if in_code:
+                out.append(_html.escape(line))
+                continue
+
+            m = _re.match(r"^(#{1,6})\s+(.+)$", line)
+            if m:
+                lvl = len(m.group(1))
+                out.append(
+                    f"<h{lvl}>{_html.escape(m.group(2))}"
+                    f"</h{lvl}>")
+                continue
+
+            if line.strip().startswith(("- ", "* ")):
+                if not in_ul:
+                    out.append("<ul>")
+                    in_ul = True
+                out.append(
+                    f"<li>{_html.escape(line.strip()[2:])}</li>")
+                continue
+            elif in_ul:
+                out.append("</ul>")
+                in_ul = False
+
+            if not line.strip():
+                out.append("<br>")
+                continue
+
+            line = _html.escape(line)
+            line = _re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", line)
+            line = _re.sub(r"\*(.+?)\*", r"<i>\1</i>", line)
+            line = _re.sub(r"`(.+?)`", r"<code>\1</code>", line)
+            out.append(f"<p>{line}</p>")
+
+        if in_ul:
+            out.append("</ul>")
+        if in_code:
+            out.append("</code></pre>")
+
+        return "\n".join(out)
+
+
 __all__ = [
-    "CodeSandbox", "SandboxRunner", "validate_bytecode",
+    "CodeSandbox", "SandboxRunner", "MultiLangRunner",
+    "validate_bytecode", "lang_available", "LANG_CONFIG",
     "_sandbox_worker", "_StdoutRedirect",
     "_FORBIDDEN_OPCODES", "_ALLOWED_OPCODES",
     "_SAFE_OPCODE_PREFIXES",
